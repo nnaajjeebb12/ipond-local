@@ -1,0 +1,25 @@
+# Repo root. Per-project rules live in i-pond-frontend/.gitignore and still
+# apply to that subtree.
+
+# Editor / agent workspace config — machine-local, not part of the product.
+.vscode/
+.qoder/
+.github/skills/
+
+# Never commit secrets or per-appliance artefacts, wherever they appear.
+.env
+.env.*
+!.env.example
+*.pem
+license.json
+
+# Build output / dependencies
+node_modules/
+.next/
+out/
+build/
+*.tsbuildinfo
+
+# OS noise
+.DS_Store
+Thumbs.db
