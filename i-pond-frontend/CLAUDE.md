@@ -133,7 +133,7 @@ Local appliance, cron every 5min
 
 - `sensor_readings` — hypertable, partitioned by `time` (TIMESTAMPTZ). Columns: `pond_id`, `temperature`, `ph`, `salinity`, `dissolved_oxygen`, `synced_at`, `source` (016). **No `id` column** — a row is identified by `(pond_id, time)`, which migration 016 made UNIQUE.
 - `owners` — retained for FK targets only (`getOperatorId()` reads the first row). No login, no roles enforced. Subscription columns dropped in migration 015.
-- `ponds` — pond metadata, `pond_code` `PND-001`..`PND-010`, `name`.
+- `ponds` — pond metadata, `pond_code` `PND-001`..`PND-010`, `name`. **Fresh installs must seed `db/seeds/002_local_appliance.sql`** — migrations create empty tables, and the old `001_seed.sql` dies on `ponds_owner_id_fkey` (it references two tenant owners it never creates), leaving zero ponds and every ingest failing `unknown_pond`.
 - `user_pond_access` — **dead table**. Still in the schema, never read or written by the app.
 - `pond_sensor_thresholds` — per-pond optimal range per sensor: `optimal_min`, `optimal_max`, `optimal_value` (target, display-only, migration 012).
 - `pond_sensor_thresholds_audit` — threshold change history: `old_value`, `new_value`.
@@ -306,6 +306,7 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - Never reuse `API_TOKEN` as `SYNC_TOKEN`.
 - Never reintroduce Vercel config (`vercel.json`, `NEXTAUTH_URL`, `AUTH_SECRET`) — this is a self-hosted Pi build.
 - Never ship a standalone build without copying `public/` and `.next/static/`.
+- Never seed a fresh appliance with `001_seed.sql` — use `002_local_appliance.sql`.
 - Never skip updating CLAUDE.md and CHANGELOG.md after a change.
 
 ## Documentation

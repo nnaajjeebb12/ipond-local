@@ -113,6 +113,11 @@ large backlog cannot overrun the cron slot; the next run picks up where it left 
 
 ## Raspberry Pi Deployment
 
+> **Deploying to a new Pi?** Follow
+> **[docs/Pi-Deployment-Checklist.md](docs/Pi-Deployment-Checklist.md)** — a
+> step-by-step checklist written for someone with no Linux experience. The
+> section below is the condensed reference for people who have done it before.
+
 The appliance is self-hosted — there is no Vercel, no serverless runtime, and no
 outbound dependency at boot. `next.config.ts` sets `output: "standalone"`, which
 emits a self-contained server at `.next/standalone/server.js` carrying only the
@@ -150,6 +155,12 @@ npm install
 cp .env.example .env && nano .env        # fill in tokens, timezone, LICENSE_PATH
 docker compose up -d                      # TimescaleDB; runs db/migrations on first boot
 mkdir -p /home/pi/logs
+
+# Seed ponds 1-10 + default thresholds. The migrations create empty tables only,
+# so without this every ESP32 POST is rejected with "unknown_pond".
+# Use 002_local_appliance.sql — 001_seed.sql is the old multi-tenant seed and
+# fails on a fresh DB with a ponds_owner_id_fkey error, leaving zero ponds.
+docker exec -i soletronix-timescaledb   psql -U soletronix -d soletronix < db/seeds/002_local_appliance.sql
 ```
 
 Place the signed `license.json` at the path you set in `LICENSE_PATH`

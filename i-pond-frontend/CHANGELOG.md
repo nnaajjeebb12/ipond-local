@@ -1,5 +1,24 @@
 # Changelog
 
+## [2026-09-12] — Pi deployment checklist + a seed that actually works
+
+### Changed
+- **`docs/Pi-Deployment-Checklist.md`** (new) — end-to-end deployment guide written for a reader with no Linux, Docker or Node experience. 12 phases from flashing the SD card to an acceptance test, every command copy-paste, each step paired with the expected output, plus a troubleshooting table keyed on the actual error strings the app emits.
+- **`db/seeds/002_local_appliance.sql`** (new) — first-boot seed for the appliance: one operator row (matching the `getOperatorId()` fallback UUID), ponds 1-10 with `pond_code`, and default optimal ranges for all four sensors. Idempotent.
+- **README** — links the checklist and documents the seed step, which it had never mentioned.
+
+### Files Modified
+- docs/Pi-Deployment-Checklist.md *(new)*
+- db/seeds/002_local_appliance.sql *(new)*
+- README.md, CLAUDE.md
+
+### Notes
+- **A fresh install was broken and nobody would have known until the sensors failed.** Reproduced on a genuinely empty database: `docker compose up -d` auto-runs the migrations and creates all 10 tables, but `db/seeds/001_seed.sql` then fails with `insert or update on table "ponds" violates foreign key constraint "ponds_owner_id_fkey"` — it assigns ponds to owners `...0002` and `...0003` that it never creates. Result: 1 owner, **0 ponds**, and every ESP32 POST rejected with `unknown_pond`. `001_seed.sql` is left untouched for the old multi-tenant deployment; the appliance uses `002_local_appliance.sql`.
+- **Default thresholds were missing too.** Migration 004 seeds them with `SELECT ... FROM ponds`, but on a fresh install it runs before any pond exists and inserts nothing — so charts would have had no optimal band and the alert worker would never have fired. The new seed inserts them after the ponds.
+- Verified the whole first-boot path on a wiped volume: fresh `docker compose up -d` → 10 tables → seed → `owners=1 ponds=10 thresholds=40` → `npm run build` → standalone boot → a real ESP32-shaped payload (`{"data":{"pnd":3,...}}`) accepted with `{"ok":true}` 201 → the reading visible via `/api/readings/latest?pond=3` and 10 ponds on `/api/ponds`. The `.env` validation one-liners in step 4.3 were run against a deliberately mismatched file to confirm they detect the failure rather than always printing OK.
+- The checklist flags the two things the deployer cannot fix alone: the licence must be signed by Soletronix against that Pi's `/proc/cpuinfo` serial, and the TimescaleDB image must have an `arm64` build for the pinned tag — worth confirming on real hardware before a site visit.
+- **Still outstanding from earlier work**: `src/lib/license.ts` embeds a development keypair. It must be swapped for the production public key before any appliance ships, or every licence can be forged by anyone holding the matching private key in `keys/`.
+
 ## [2026-09-09] — Pi deployment config: standalone output, drop Vercel
 
 ### Changed
