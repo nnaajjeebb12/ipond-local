@@ -1,5 +1,36 @@
 # Changelog
 
+## [2026-09-14] — USB gateway follow-through: sync contract, listener hardening, compose consolidation
+
+Review of commit `f73924d` (USB-wired ESP32), fixing what the switch left inconsistent.
+
+### Changed
+- **Sync receiver brought to the production contract.** `src/app/api/sync/route.ts` now accepts `{ time, owner_id, pond_code, … }` and resolves `(owner_id, pond_code)` → `ponds.id` in SQL, matching the receiver on seeme-db.com. Before this the worker in this repo sent a payload the receiver in this repo rejected with `400 invalid_pond_id`.
+- **Receiver reports `unknown` and `duplicate` separately** (plus `skipped` = their sum for older clients). A duplicate is already on the server and safe to mark; an unknown `(owner, pond_code)` is not on the server at all.
+- **Worker refuses to lose data.** `runSync` now (a) fails closed with `not_configured` when `SYNC_OWNER_ID` is missing or not a UUID, and (b) when the server reports `unknown > 0`, marks nothing from that batch and returns the new reason `pond_mismatch`. Previously a wrong owner id produced `synced N, 0 pending` while the server had inserted nothing — silent, permanent loss. Verified: wrong owner now leaves every row pending; correcting it ships them.
+- **`scripts/serial-listener.js` hardened.** Exits on port `close` so systemd's `Restart=always` re-opens the port after an unplug (before, it stayed alive and deaf). Loads `.env` like the other scripts. Waits for in-flight POSTs before exiting. `SERIAL_PORT=-` reads stdin so the whole pipeline can be tested without hardware. Uses Node's `readline` on the serial Duplex directly, so `@serialport/parser-readline` was dropped. `npm run serial-listener` added.
+- **`/api/readings/compare` fixed for `range=today`** — the dashboard's default range. The today query never referenced `$3`, so Postgres failed with `could not determine data type of parameter $3` and the route returned 500. Same bug you found on the main server; same fix applies there.
+- **One compose file.** The root `docker-compose.yml` from `f73924d` is now the canonical config (`ipond-timescaledb`, db `ipond`, bind-mounted data) but moved to `i-pond-frontend/docker-compose.yml` so `${…}` interpolation reads the app's `.env`; the root copy is deleted. Password comes from `.env`, migrations are mounted for first-boot auto-run, `DB_DATA_PATH` is configurable, and 5432 is bound to `127.0.0.1` only.
+- **`run_remaining.sh`** made generic: reads user/db from `.env`, takes an optional start number, iterates whatever files exist.
+- **`.env.example`**: `SERIAL_PORT`, `SYNC_OWNER_ID`, `DB_DATA_PATH`; database renamed `ipond`; `API_TOKEN` guidance updated (the gateway no longer carries it).
+- **Docs**: checklist §11 rewritten for USB (by-id device path, `dialout` group, `ipond-serial` systemd unit, unplug test, stdin test), every `docker exec` corrected to the real container/db names, troubleshooting entries for the listener and `pond_mismatch`. README and CLAUDE.md updated to match.
+
+### Files Modified
+- src/app/api/sync/route.ts, src/lib/sync.ts, src/app/api/sync/trigger/route.ts
+- src/app/api/readings/compare/route.ts
+- scripts/serial-listener.js, db/migrations/run_remaining.sh
+- docker-compose.yml *(rewritten; root copy deleted)*, .env.example, .gitignore, package.json, package-lock.json
+- docs/Pi-Deployment-Checklist.md, README.md, CLAUDE.md
+
+### Notes
+- **Verified end to end.** Listener: fed the exact bytes the firmware prints (CRLF, `%.2f` floats, ESP32 boot-loader garbage, junk, a `pnd` out of range) → 2 readings landed in the DB, garbage skipped, bad pond rejected 400, exit 0 — and exit 0 with a clear message when the app is down. Receiver: correct owner → `inserted 1`; re-send → `duplicate 1`; wrong owner → `unknown 1`; old `pond_id` payload → `400 invalid_owner_id`; microseconds preserved. Worker: no `SYNC_OWNER_ID` → refuses; wrong owner → `pond_mismatch`, rows stay pending; correct owner → ships. Compare route `range=today` → 200.
+- **Reproduced the same libuv crash-on-exit in the listener that the sync worker had** (exit 127 after a fetch teardown on Windows); fixed the same way. Most likely Linux-only-benign, but the exit code contract matters for systemd.
+- **On the Pi that already runs the root compose file:** Docker Compose names its project after the directory, so `docker compose up -d` from `i-pond-frontend/` will refuse to start because `ipond-timescaledb` already belongs to the `ipond-local` project. Data is a bind mount at `/mnt/ipond-data`, so it survives. One-time migration: `cd /home/pi/ipond-local && docker compose -p ipond-local down` (stops and removes only the container), then `cd i-pond-frontend && docker compose up -d`. Make sure `POSTGRES_PASSWORD` in `.env` is the password the database was created with — the container reads it on first init only, and the data directory is already initialised.
+- **The committed password is still in history.** `f73924d` contains the `POSTGRES_PASSWORD` value in plaintext in the root `docker-compose.yml`. Removing it from the file does not remove it from git. Treat it as burned once the repo has a remote, or rewrite history before pushing.
+- **For the production receiver on seeme-db.com:** add `unknown` (rows whose `(owner_id, pond_code)` did not resolve) to its response. Until it does, the Pi falls back to the old behaviour on that receiver — it will mark rows the server skipped, with only a log warning to show for it. The SQL in this repo's route is drop-in.
+- Local `license.json` no longer validates (`bad_signature`) — expected, it was signed with the previous dev key. Dev machines need a licence signed with the new key.
+- `esp32_iotgateway_new_soletronix.ino.DEPRECATED_NO_WIFI` and `esp32_iotgateway_old_*.ino` remain in the repo as reference.
+
 ## [2026-09-12] — Pi deployment checklist + a seed that actually works
 
 ### Changed

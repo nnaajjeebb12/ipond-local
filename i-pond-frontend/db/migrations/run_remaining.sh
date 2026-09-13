@@ -1,10 +1,31 @@
 #!/bin/bash
-set -e
-FILES="005_admin_management.sql 006_ingestion_logs.sql 007_alerts.sql 008_notifications.sql 009_pond_status_log.sql 010_alerts_retrigger.sql 011_status_logger_job.sql 012_optimal_value.sql 013_subscription.sql 014_connectivity_alerts.sql 015_drop_subscription.sql 016_sync.sql"
+# Apply migrations by hand to an EXISTING database.
+#
+# On a fresh install this is unnecessary: docker-compose.yml mounts this folder
+# as the init directory and Postgres runs every file on first start. Use this
+# when new migration files arrive after the database already exists, or when
+# the database was created without the mount.
+#
+#   cd i-pond-frontend
+#   ./db/migrations/run_remaining.sh 015          # apply 015 and everything after
+#   ./db/migrations/run_remaining.sh              # apply ALL (each file is idempotent)
+#
+# Reads POSTGRES_USER / POSTGRES_DB from ./.env so it matches docker-compose.yml.
+set -euo pipefail
+cd "$(dirname "$0")"
 
-for f in $FILES; do
+ENV_FILE="../../.env"
+[ -f "$ENV_FILE" ] || { echo "no .env at $ENV_FILE"; exit 1; }
+DB_USER=$(grep '^POSTGRES_USER=' "$ENV_FILE" | cut -d= -f2)
+DB_NAME=$(grep '^POSTGRES_DB=' "$ENV_FILE" | cut -d= -f2)
+CONTAINER="${DB_CONTAINER:-ipond-timescaledb}"
+FROM="${1:-000}"
+
+for f in $(ls [0-9][0-9][0-9]_*.sql | sort); do
+  num="${f%%_*}"
+  [ "$num" -lt "$FROM" ] 2>/dev/null && continue
   echo "[$(date +%H:%M:%S)] START $f"
-  docker exec -i ipond-timescaledb psql -U soletronix -d ipond -v ON_ERROR_STOP=1 -f - < "$f"
-  echo "[$(date +%H:%M:%S)] DONE $f"
+  docker exec -i "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 < "$f"
+  echo "[$(date +%H:%M:%S)] DONE  $f"
 done
 echo "ALL MIGRATIONS COMPLETE"

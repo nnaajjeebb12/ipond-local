@@ -6,7 +6,10 @@
  * same code inline with the app pool. One implementation, two callers.
  *
  * `sensor_readings` has no surrogate key, so a row is identified by
- * (pond_id, time) throughout — see db/migrations/016_sync.sql.
+ * (pond_id, time) locally — see db/migrations/016_sync.sql. On the wire a pond
+ * is identified by (owner_id, pond_code) instead: every appliance numbers its
+ * ponds 1..10, so the multi-tenant cloud needs the owner to tell them apart.
+ * SYNC_OWNER_ID is that owner's UUID on the main server.
  *
  * Timestamps are carried as full-precision ISO strings and never pass through a
  * JS Date: Postgres stores microseconds, Date only holds milliseconds, and
@@ -28,6 +31,7 @@ export type SyncReason =
 	| "nothing_to_sync"
 	| "offline"
 	| "server_unreachable"
+	| "pond_mismatch"
 	| "not_configured"
 	| "server_error"
 	| "db_error";
@@ -38,6 +42,8 @@ export type SyncResult = {
 	synced: number;
 	pending: number;
 	batches: number;
+	/** Rows the server accepted but did not insert: duplicates, or unknown (owner, pond_code). */
+	skipped: number;
 	message: string;
 };
 
@@ -176,6 +182,7 @@ function result(
 		synced: 0,
 		pending: 0,
 		batches: 0,
+		skipped: 0,
 		message,
 		...extra,
 	};
@@ -195,6 +202,15 @@ export async function runSync(
 	if (!token) {
 		log("SYNC_TOKEN is not set — nothing to do");
 		return result("not_configured", "SYNC_TOKEN is not set");
+	}
+
+	// Without the owner the cloud cannot resolve a single pond. It would still
+	// answer 200 with everything skipped, and we would then mark every row as
+	// synced — silent data loss. Refuse to run instead.
+	const ownerId = process.env.SYNC_OWNER_ID;
+	if (!ownerId || !/^[0-9a-f-]{36}$/i.test(ownerId)) {
+		log("SYNC_OWNER_ID is not set or not a UUID — nothing to do");
+		return result("not_configured", "SYNC_OWNER_ID is not set");
 	}
 
 	const target = syncTarget();
@@ -226,6 +242,7 @@ export async function runSync(
 
 	let synced = 0;
 	let batches = 0;
+	let skipped = 0;
 
 	while (batches < MAX_BATCHES) {
 		let batch: ReadingRow[];
@@ -243,7 +260,6 @@ export async function runSync(
 		if (batch.length === 0) break;
 		batches += 1;
 
-		const ownerId = process.env.SYNC_OWNER_ID;
 		const readings = batch.map((r) => ({
 			time: r.time_iso,
 			owner_id: ownerId,
@@ -288,6 +304,46 @@ export async function runSync(
 			});
 		}
 
+		// The server reports how many it actually inserted. A skip is either a
+		// duplicate (harmless) or an unknown (owner, pond_code) pair — the server
+		// does not say which per row, so surface the count loudly in the log.
+		let serverInserted: number | null = null;
+		let serverSkipped: number | null = null;
+		let serverUnknown: number | null = null;
+		try {
+			const ack = (await res.json()) as { inserted?: unknown; skipped?: unknown; unknown?: unknown };
+			if (typeof ack.inserted === "number") serverInserted = ack.inserted;
+			if (typeof ack.skipped === "number") serverSkipped = ack.skipped;
+			if (typeof ack.unknown === "number") serverUnknown = ack.unknown;
+		} catch {
+			// older receiver without counts — fall through
+		}
+		if (serverSkipped !== null) skipped += serverSkipped;
+
+		// The server could not resolve (owner_id, pond_code) for some rows. They
+		// are NOT on the far side, so marking them synced here would lose them
+		// for good. Stop, mark nothing from this batch, and say why. Almost
+		// always a wrong SYNC_OWNER_ID or ponds not yet created on the server.
+		if (serverUnknown !== null && serverUnknown > 0) {
+			log(
+				`batch ${batches}: server did not recognise ${serverUnknown}/${batch.length} rows — ` +
+					`check SYNC_OWNER_ID and that ponds PND-001.. exist under that owner on the main server. Nothing marked.`
+			);
+			return result("pond_mismatch", `Main server rejected ${serverUnknown} readings: unknown pond for this owner`, {
+				synced,
+				batches: batches - 1,
+				skipped,
+				pending: pending - synced,
+			});
+		}
+		// Older receiver that cannot distinguish: warn, but proceed as before.
+		if (serverUnknown === null && serverSkipped !== null && serverInserted === 0 && serverSkipped === batch.length) {
+			log(
+				`batch ${batches}: server skipped ALL ${batch.length} rows and does not report why — ` +
+					`if this is not a re-send, check SYNC_OWNER_ID`
+			);
+		}
+
 		// Accepted. Mark locally even when the server skipped duplicates — the
 		// rows are on the far side either way, which is what synced_at means.
 		let marked: number;
@@ -303,7 +359,10 @@ export async function runSync(
 		}
 
 		synced += marked;
-		log(`batch ${batches}: sent ${batch.length}, marked ${marked}`);
+		log(
+			`batch ${batches}: sent ${batch.length}, marked ${marked}` +
+				(serverInserted !== null ? `, server inserted ${serverInserted}, skipped ${serverSkipped}` : "")
+		);
 
 		if (batch.length < BATCH_SIZE) break;
 	}
@@ -313,9 +372,8 @@ export async function runSync(
 		log(`batch ceiling reached — ${remaining} still pending, will resume next run`);
 	}
 
-	return result("ok", `Synced ${synced} reading${synced === 1 ? "" : "s"}`, {
-		synced,
-		batches,
-		pending: remaining,
-	});
+	const msg =
+		`Synced ${synced} reading${synced === 1 ? "" : "s"}` +
+		(skipped > 0 ? ` (${skipped} skipped by server)` : "");
+	return result("ok", msg, { synced, batches, skipped, pending: remaining });
 }

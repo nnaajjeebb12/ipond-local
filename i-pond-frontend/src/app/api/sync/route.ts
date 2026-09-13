@@ -5,21 +5,33 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Sync receiver — runs on the MAIN server (seeme-db.com), not the appliance.
+ * Sync receiver — the MAIN SERVER side of cloud sync.
  *
- * Local Pis POST batches of readings here. Authenticated with SYNC_TOKEN, which
- * is deliberately separate from the ESP32 API_TOKEN so a compromised gateway
- * cannot bulk-write history and a leaked sync token cannot pose as a sensor.
+ * Production runs a copy of this on seeme-db.com (its own repo). This file is
+ * kept in the appliance repo so the worker in src/lib/sync.ts and its receiver
+ * live side by side and cannot drift apart again: the contract below is the
+ * one the production receiver implements.
  *
- * Idempotent: ON CONFLICT (pond_id, time) DO NOTHING means a re-sent batch is a
- * no-op, so the worker can safely re-send anything it failed to mark locally.
+ * Ponds are identified by (owner_id, pond_code), NOT by the Pi's local integer
+ * pond_id. Every appliance numbers its ponds 1..10 and codes them PND-001..010,
+ * so the cloud — which is multi-tenant — needs the owner to disambiguate.
+ * pond_code is unique per owner there, not globally.
+ *
+ * Authenticated with SYNC_TOKEN, deliberately separate from the ESP32
+ * API_TOKEN so a compromised gateway cannot bulk-write history and a leaked
+ * sync token cannot pose as a sensor.
+ *
+ * Idempotent: ON CONFLICT (pond_id, time) DO NOTHING makes a re-sent batch a
+ * no-op, so the worker may safely re-send anything it failed to mark.
  */
 
 const MAX_READINGS = 5000;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type IncomingReading = {
   time?: unknown;
-  pond_id?: unknown;
+  owner_id?: unknown;
+  pond_code?: unknown;
   temperature?: unknown;
   ph?: unknown;
   salinity?: unknown;
@@ -55,7 +67,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "readings_required" }, { status: 400 });
   }
   if (body.readings.length === 0) {
-    return NextResponse.json({ synced: 0 });
+    return NextResponse.json({ ok: true, inserted: 0, skipped: 0 });
   }
   if (body.readings.length > MAX_READINGS) {
     return NextResponse.json(
@@ -65,7 +77,8 @@ export async function POST(req: NextRequest) {
   }
 
   const times: string[] = [];
-  const pondIds: number[] = [];
+  const ownerIds: string[] = [];
+  const pondCodes: string[] = [];
   const temperature: (number | null)[] = [];
   const ph: (number | null)[] = [];
   const salinity: (number | null)[] = [];
@@ -80,13 +93,18 @@ export async function POST(req: NextRequest) {
     if (!Number.isFinite(Date.parse(t))) {
       return NextResponse.json({ error: "invalid_time" }, { status: 400 });
     }
-    const pondId = num(raw?.pond_id);
-    if (pondId === null || !Number.isInteger(pondId) || pondId < 1) {
-      return NextResponse.json({ error: "invalid_pond_id" }, { status: 400 });
+    const ownerId = String(raw?.owner_id ?? "");
+    if (!UUID_RE.test(ownerId)) {
+      return NextResponse.json({ error: "invalid_owner_id" }, { status: 400 });
+    }
+    const pondCode = String(raw?.pond_code ?? "").trim();
+    if (!pondCode) {
+      return NextResponse.json({ error: "invalid_pond_code" }, { status: 400 });
     }
 
     times.push(t);
-    pondIds.push(pondId);
+    ownerIds.push(ownerId);
+    pondCodes.push(pondCode);
     temperature.push(num(raw?.temperature));
     ph.push(num(raw?.ph));
     salinity.push(num(raw?.salinity));
@@ -97,22 +115,55 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    // Unknown pond_ids would violate the ponds FK and abort the whole batch, so
-    // they are filtered out here: one misconfigured pond must not block a sync.
-    const { rowCount } = await pool.query(
-      `INSERT INTO sensor_readings
-         (time, pond_id, temperature, ph, salinity, dissolved_oxygen, source)
-       SELECT b.time, b.pond_id, b.temperature, b.ph, b.salinity, b.dissolved_oxygen, b.source
-         FROM unnest(
-                $1::timestamptz[], $2::int[], $3::float8[],
-                $4::float8[], $5::float8[], $6::float8[], $7::text[]
-              ) AS b(time, pond_id, temperature, ph, salinity, dissolved_oxygen, source)
-        WHERE EXISTS (SELECT 1 FROM ponds p WHERE p.id = b.pond_id)
-       ON CONFLICT (pond_id, time) DO NOTHING`,
-      [times, pondIds, temperature, ph, salinity, dox, source]
+    // Resolve (owner_id, pond_code) -> ponds.id in SQL. Readings whose pond
+    // does not exist for that owner are dropped by the JOIN rather than
+    // aborting the batch, and counted so the appliance can see the mismatch.
+    const { rows } = await pool.query<{ inserted: string; matched: string }>(
+      `WITH incoming AS (
+         SELECT b.time, b.owner_id, b.pond_code, b.temperature, b.ph,
+                b.salinity, b.dissolved_oxygen, b.source
+           FROM unnest(
+                  $1::timestamptz[], $2::uuid[], $3::text[], $4::float8[],
+                  $5::float8[], $6::float8[], $7::float8[], $8::text[]
+                ) AS b(time, owner_id, pond_code, temperature, ph,
+                       salinity, dissolved_oxygen, source)
+       ),
+       matched AS (
+         SELECT i.time, p.id AS pond_id, i.temperature, i.ph, i.salinity,
+                i.dissolved_oxygen, i.source
+           FROM incoming i
+           JOIN ponds p ON p.owner_id = i.owner_id AND p.pond_code = i.pond_code
+       ),
+       ins AS (
+         INSERT INTO sensor_readings
+           (time, pond_id, temperature, ph, salinity, dissolved_oxygen, source)
+         SELECT time, pond_id, temperature, ph, salinity, dissolved_oxygen, source
+           FROM matched
+         ON CONFLICT (pond_id, time) DO NOTHING
+         RETURNING 1
+       )
+       SELECT (SELECT COUNT(*) FROM ins)::text     AS inserted,
+              (SELECT COUNT(*) FROM matched)::text AS matched`,
+      [times, ownerIds, pondCodes, temperature, ph, salinity, dox, source]
     );
 
-    return NextResponse.json({ synced: rowCount ?? 0, received: times.length });
+    const inserted = Number(rows[0]?.inserted ?? 0);
+    const matched = Number(rows[0]?.matched ?? 0);
+    // Two very different kinds of "skipped": a duplicate is already on the
+    // server and safe for the appliance to mark; an unknown (owner, pond_code)
+    // is NOT on the server and the appliance must keep it pending. Report both
+    // so the worker can tell them apart. `skipped` stays as their sum for
+    // receivers/clients that only know the older shape.
+    const unknown = times.length - matched;
+    const duplicate = matched - inserted;
+    return NextResponse.json({
+      ok: true,
+      inserted,
+      duplicate,
+      unknown,
+      skipped: unknown + duplicate,
+      received: times.length,
+    });
   } catch (err) {
     console.error("sync_insert_error", err);
     return NextResponse.json({ error: "db_error" }, { status: 500 });

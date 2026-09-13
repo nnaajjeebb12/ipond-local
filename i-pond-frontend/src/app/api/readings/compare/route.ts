@@ -78,13 +78,13 @@ export async function GET(req: NextRequest) {
 
     const sql = useToday
       ? `SELECT sr.pond_id AS pond_id,
-                (time_bucket($1::interval, sr.time AT TIME ZONE $4) AT TIME ZONE $4) AS bucket,
+                (time_bucket($1::interval, sr.time AT TIME ZONE $3) AT TIME ZONE $3) AS bucket,
                 ROUND(AVG(sr.${column})::numeric, 2)::float8 AS avg,
                 ROUND(MIN(sr.${column})::numeric, 2)::float8 AS min,
                 ROUND(MAX(sr.${column})::numeric, 2)::float8 AS max
            FROM sensor_readings sr
           WHERE sr.pond_id = ANY($2::int[])
-            AND sr.time >= date_trunc('day', NOW() AT TIME ZONE $4) AT TIME ZONE $4
+            AND sr.time >= date_trunc('day', NOW() AT TIME ZONE $3) AT TIME ZONE $3
           GROUP BY sr.pond_id, bucket
           ORDER BY sr.pond_id, bucket ASC`
       : `SELECT sr.pond_id AS pond_id,
@@ -104,8 +104,11 @@ export async function GET(req: NextRequest) {
           GROUP BY sr.pond_id, bucket, pst.optimal_min, pst.optimal_max
           ORDER BY sr.pond_id, bucket ASC`;
 
+    // The "today" query never references $3, and Postgres cannot infer the type
+    // of a parameter that appears nowhere in the statement: it fails with
+    // "could not determine data type of parameter $3". Pass only what is used.
     const params = useToday
-      ? [cfg.bucket, pondIds, cfg.interval, TZ]
+      ? [cfg.bucket, pondIds, TZ]
       : [cfg.bucket, pondIds, cfg.interval, TZ, column];
 
     const { rows } = await pool.query<{

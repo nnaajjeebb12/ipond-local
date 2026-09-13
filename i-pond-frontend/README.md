@@ -15,7 +15,7 @@ This repository is the **local appliance build**: a self-hosted Raspberry Pi tha
 - **Database** — PostgreSQL 16 + TimescaleDB (hypertable on `sensor_readings`), `pg` (node-postgres)
 - **Export** — jsPDF + jspdf-autotable (PDF), native CSV
 - **HTTP / Time** — axios, moment
-- **Hardware** — ESP32 gateway (firmware `esp32_iotgateway.ino`), Bearer-token ingest
+- **Hardware** — ESP32 gateway (`esp32_iotgateway_new_soletronix_Serial.ino`), **wired by USB** — no Wi-Fi. `scripts/serial-listener.js` forwards its serial output into the ingest route
 - **Deployment** — Next.js `output: "standalone"` behind nginx, systemd-managed
 
 ## Quick Start
@@ -46,7 +46,10 @@ This repository is the **local appliance build**: a self-hosted Raspberry Pi tha
 | `POSTGRES_USER` | Yes | Database superuser, consumed by `docker-compose.yml`. |
 | `POSTGRES_PASSWORD` | Yes | Database password, consumed by `docker-compose.yml`. |
 | `POSTGRES_DB` | Yes | Database name, consumed by `docker-compose.yml`. |
-| `API_TOKEN` | Yes | Bearer token the ESP32 must send to `POST /api/send-sensor-data`. |
+| `API_TOKEN` | Yes | Bearer token for `POST /api/send-sensor-data`. The USB serial listener supplies it; the gateway no longer needs it. |
+| `SERIAL_PORT` | Yes | The gateway's serial device. Use the stable `/dev/serial/by-id/...` path, not `/dev/ttyUSB0`. `-` reads stdin (testing). |
+| `SYNC_OWNER_ID` | Yes (to sync) | This site's owner UUID on the main server. The worker refuses to run without it. |
+| `DB_DATA_PATH` | No | Bind-mount path for database files (default `./data/timescaledb`). Put it on an external drive on the Pi. |
 | `SYNC_TOKEN` | No | Bearer token for cloud sync. **Must differ from `API_TOKEN`.** Required on the local Pi to sync, and on the main server to accept syncs. Without it the dashboard shows "Cloud sync not configured". |
 | `MAIN_SERVER_URL` | No | Base URL of the main server the sync worker ships to (default `https://seeme-db.com`). Local Pi only. |
 | `SYNC_LOG_PATH` | No | Sync worker log file (default `~/logs/sync-worker.log`). |
@@ -67,7 +70,7 @@ receiver de-duplicates on `(pond_id, time)`, making re-sends no-ops.
 
 1. Apply the migration:
    ```bash
-   docker exec -i soletronix-timescaledb psql -U soletronix -d soletronix \
+   docker exec -i ipond-timescaledb psql -U soletronix -d ipond \
      < db/migrations/016_sync.sql
    ```
 2. Add `SYNC_TOKEN` (and `MAIN_SERVER_URL` if not `https://seeme-db.com`) to `.env`.
@@ -160,7 +163,7 @@ mkdir -p /home/pi/logs
 # so without this every ESP32 POST is rejected with "unknown_pond".
 # Use 002_local_appliance.sql — 001_seed.sql is the old multi-tenant seed and
 # fails on a fresh DB with a ponds_owner_id_fkey error, leaving zero ponds.
-docker exec -i soletronix-timescaledb   psql -U soletronix -d soletronix < db/seeds/002_local_appliance.sql
+docker exec -i ipond-timescaledb   psql -U soletronix -d ipond < db/seeds/002_local_appliance.sql
 ```
 
 Place the signed `license.json` at the path you set in `LICENSE_PATH`
@@ -236,11 +239,18 @@ sudo ln -s /etc/nginx/sites-available/ipond /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
+### Serial listener (systemd)
+
+The gateway is wired by USB. `scripts/serial-listener.js` reads its JSON lines
+and POSTs them to the local ingest route; it exits on port close so
+`Restart=always` re-opens the port when the cable comes back. Unit file and
+`dialout` group setup are in the checklist, §11.
+
 ### Cron
 
 ```cron
-*/5 * * * * cd /home/pi/ipond-local && npm run alert-worker >> /home/pi/logs/alert-worker.log 2>&1
-*/5 * * * * cd /home/pi/ipond-local && npm run sync-worker  >> /home/pi/logs/sync-worker.log 2>&1
+*/5 * * * * cd /home/pi/ipond-local/i-pond-frontend && npm run alert-worker >> /home/pi/logs/alert-worker.log 2>&1
+*/5 * * * * cd /home/pi/ipond-local/i-pond-frontend && npm run sync-worker  >> /home/pi/logs/sync-worker.log 2>&1
 ```
 
 ### Redeploying
@@ -258,7 +268,7 @@ sudo systemctl restart ipond
 Apply any new migrations first:
 
 ```bash
-docker exec -i soletronix-timescaledb psql -U soletronix -d soletronix \
+docker exec -i ipond-timescaledb psql -U soletronix -d ipond \
   < db/migrations/0XX_name.sql
 ```
 

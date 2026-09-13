@@ -1,17 +1,27 @@
+# TimescaleDB for the local appliance.
+#
+# Run from THIS directory: `docker compose up -d`. Compose reads ./.env for the
+# ${...} values below, which is why the file lives next to .env rather than at
+# the repo root. Never put the password in this file — it is committed.
+#
+# Data is a bind mount, not a Docker volume, so it can live on an external
+# SSD/USB drive (DB_DATA_PATH) — SD cards wear out under database write load.
+# The directory must exist and be writable before the first `up`.
+#
+# db/migrations is mounted as the init directory: on the FIRST start with an
+# empty data directory, Postgres runs every *.sql in it, in name order. It is
+# never re-run after that — apply later migrations by hand (see README).
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg16
-    container_name: soletronix-timescaledb
+    container_name: ipond-timescaledb
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - timescaledb_data:/var/lib/postgresql/data
+      - ${DB_DATA_PATH:-./data/timescaledb}:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d:ro
-
-volumes:
-  timescaledb_data:

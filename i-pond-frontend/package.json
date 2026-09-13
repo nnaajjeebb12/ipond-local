@@ -10,10 +10,10 @@
     "seed:pond1": "node --experimental-strip-types scripts/seed-pond1-today.ts",
     "alert-worker": "npx tsx scripts/alert-worker.ts",
     "license:generate": "node --experimental-strip-types scripts/generate-license.ts",
-    "sync-worker": "tsx scripts/sync-worker.ts"
+    "sync-worker": "tsx scripts/sync-worker.ts",
+    "serial-listener": "node scripts/serial-listener.js"
   },
   "dependencies": {
-    "@serialport/parser-readline": "^13.0.0",
     "axios": "^1.15.0",
     "bcryptjs": "^2.4.3",
     "jspdf": "^4.2.1",

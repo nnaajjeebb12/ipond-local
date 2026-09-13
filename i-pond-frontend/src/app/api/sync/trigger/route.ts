@@ -35,7 +35,7 @@ export async function POST() {
   } catch (err) {
     console.error("sync_trigger_error", err);
     return NextResponse.json(
-      { ok: false, reason: "db_error", message: "Sync failed", synced: 0, pending: 0, batches: 0 },
+      { ok: false, reason: "db_error", message: "Sync failed", synced: 0, pending: 0, batches: 0, skipped: 0 },
       { status: 500 }
     );
   } finally {

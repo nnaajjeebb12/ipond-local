@@ -58,6 +58,7 @@ IoT aquaculture monitoring system. Nationwide PH deployment. 5-year license.
 - `node --experimental-strip-types scripts/alert-worker.ts` — run alert worker once
 - `npm run license:generate -- --client "Name" --serial <piSerial|ANY> --days 1825` — sign a license
 - `npm run sync-worker` — push unsynced readings to the main server, once
+- `npm run serial-listener` — forward the USB gateway's readings into the app (runs forever; `SERIAL_PORT=-` reads stdin for testing)
 - `docker compose up -d` — start TimescaleDB
 
 No test suite. Verify changes via dev server + browser.
@@ -77,18 +78,17 @@ No test suite. Verify changes via dev server + browser.
 - **Database**: TimescaleDB pg16 (Docker, `docker-compose.yml`)
 - **Migrations**: 16 files in `/db/migrations/` (001 → 016)
 - **Deploy**: Next.js `output: "standalone"` + systemd + Nginx + Docker (no Vercel — `vercel.json` deleted)
-- **ESP32**: `esp32_iotgateway.ino` — DO NOT change firmware
-- **ESP32 (SD variant)**: `esp32_iotgateway_new_soletronix.ino` — has SD card offline backlog (saveToSD/replayBacklog, SD_CS_PIN=5). Saves payload to `/pondN/<millis>.txt` on WiFi down or HTTP non-2xx; replays on setup + WiFi reconnect
+- **ESP32 (current)**: `esp32_iotgateway_new_soletronix_Serial.ino` — **USB-wired, no Wi-Fi, no HTTP, no SD**. Prints one `{"data":{...}}` JSON line per reading over USB serial at 9600 baud. `scripts/serial-listener.js` on the Pi forwards each line to `POST /api/send-sensor-data`, so everything downstream is unchanged.
+- **ESP32 (deprecated)**: `esp32_iotgateway_new_soletronix.ino.DEPRECATED_NO_WIFI` — the old Wi-Fi/HTTP/SD-backlog variant, kept for reference only
 - **SD diagnostic**: `sd_card_test.ino` — standalone SD test (SD.h/SPI, CS GPIO5, 9600 baud). Tests in `runTests()`; type `run` in Serial Monitor (Newline ending) to re-run without reset
 
 ## Architecture
 
 ```
-ESP32 (15min interval)
-  → POST https://seeme-db.com/api/send-sensor-data
-  → Nginx :80
-  → Next.js/PM2 :3000
-  → TimescaleDB :5432 (localhost only)
+ESP32 gateway (15min interval, USB cable, 9600 baud)
+  → scripts/serial-listener.js  (systemd: ipond-serial)
+  → POST http://localhost:3000/api/send-sensor-data  (Bearer API_TOKEN)
+  → TimescaleDB :5432 (127.0.0.1 only)
 
 Cloudflare Tunnel (HTTP only — no TCP)
   seeme-db.com      → HTTP:80
@@ -101,7 +101,8 @@ Background cron every 5min
 Local appliance, cron every 5min
   → scripts/sync-worker.ts
   → POST $MAIN_SERVER_URL/api/sync  (Bearer SYNC_TOKEN)
-  → marks sensor_readings.synced_at
+  → ponds identified by (SYNC_OWNER_ID, pond_code), never local pond_id
+  → marks sensor_readings.synced_at only for rows the server resolved
 ```
 
 ## Cloud Sync
@@ -113,7 +114,9 @@ Local appliance, cron every 5min
 - `SYNC_TOKEN` is deliberately **not** `API_TOKEN`: a compromised ESP32 must not be able to bulk-write history, and a leaked sync token must not be able to pose as a sensor.
 - Target host env var is `MAIN_SERVER_URL` (default `https://seeme-db.com`).
 - The worker always **exits 0** — "no internet" is a normal outcome. Never call `process.exit()` straight after a failed fetch: it lands on a closing handle and aborts with a libuv assertion (exit 127) even on success.
-- Unknown `pond_id`s are filtered by the receiver rather than rejected, so one misconfigured pond cannot block a whole batch.
+- **On the wire a pond is `(owner_id, pond_code)`, never the local `pond_id`.** Every appliance numbers ponds 1..10 / PND-001..010; the multi-tenant cloud needs `SYNC_OWNER_ID` to tell sites apart. The worker refuses to run without it.
+- The receiver answers `{ ok, inserted, duplicate, unknown, skipped, received }`. `duplicate` = already there (safe to mark). `unknown` = no pond for that `(owner, code)` on the server (**NOT** there). **The worker marks nothing and returns `pond_mismatch` when `unknown > 0`** — marking would silently lose those readings forever. A receiver that omits `unknown` gets the old behaviour plus a loud log line.
+- The production receiver on seeme-db.com lives in its own repo; `src/app/api/sync/route.ts` here is the reference implementation of the same contract so the two sides cannot drift apart again.
 
 ## Sensors (CRITICAL)
 
@@ -222,7 +225,7 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - `GET /api/utilization?ponds=&from=&to=` — uptime % from `pond_status_log`
 
 ### Cloud sync
-- `POST /api/sync` — **main server only.** Bearer `SYNC_TOKEN`. Body `{ readings: [{ time, pond_id, temperature, ph, salinity, dissolved_oxygen, source }] }`. Bulk insert, `ON CONFLICT (pond_id, time) DO NOTHING`. Returns `{ synced, received }`.
+- `POST /api/sync` — **main server only** (reference copy here). Bearer `SYNC_TOKEN`. Body `{ readings: [{ time, owner_id, pond_code, temperature, ph, salinity, dissolved_oxygen, source }] }`. Resolves `(owner_id, pond_code)` → `ponds.id` in SQL, bulk insert, `ON CONFLICT (pond_id, time) DO NOTHING`. Returns `{ ok, inserted, duplicate, unknown, skipped, received }`.
 - `GET /api/sync/status` — local. `{ lastSyncAt, pendingCount, online, serverReachable, configured }`. Connectivity probe cached 30s.
 - `POST /api/sync/trigger` — local. Runs `runSync` inline for the dashboard button; 409 while one is already running in-process.
 
@@ -275,7 +278,9 @@ All pages are open — no session, no role gate. The license gate wraps them all
 3. `server.js` **chdirs to its own directory**, so `process.cwd()` is `.next/standalone`. `LICENSE_PATH` must be **absolute** or the license reads as `missing` and the app bricks itself. The build also copies `.env` into `.next/standalone/.env`, so editing the project `.env` post-build does nothing — pass config via systemd `EnvironmentFile`, which takes precedence.
 
 - **Deploy**: `git pull && npm install && npm run build && cp -r public .next/standalone/ && cp -r .next/static .next/standalone/.next/ && sudo systemctl restart ipond`
-- **Migration**: `docker exec -i soletronix-timescaledb psql -U soletronix -d soletronix < db/migrations/XXX.sql`
+- **Migration**: `docker exec -i ipond-timescaledb psql -U soletronix -d ipond < db/migrations/XXX.sql`, or `./db/migrations/run_remaining.sh 0NN` to apply from a number onward.
+- **Compose**: one file, `i-pond-frontend/docker-compose.yml` — container `ipond-timescaledb`, db `ipond`, data bind-mounted at `DB_DATA_PATH`, password from `.env`, port bound to `127.0.0.1` only. Run it from the app directory so `.env` is picked up.
+- **Serial listener**: systemd unit `ipond-serial`, `After=ipond.service`, `Restart=always`. The listener **exits on port close** on purpose so systemd re-opens the port when the cable comes back. `pi` must be in `dialout`.
 - Never commit `.env`. Never commit `.next` folder.
 - Each appliance needs its own signed `license.json` at `LICENSE_PATH`, matching that Pi's `/proc/cpuinfo` serial.
 
@@ -304,6 +309,10 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - Never round-trip a `sensor_readings.time` through a JS `Date` — microseconds are lost and sync silently stops matching rows.
 - Never mark `synced_at` before the main server has confirmed the batch.
 - Never reuse `API_TOKEN` as `SYNC_TOKEN`.
+- Never mark a reading synced that the server reported as `unknown`.
+- Never commit a database password — `docker-compose.yml` reads it from `.env`.
+- Never make the serial listener swallow a port close — it must exit so systemd restarts it.
+- Never pass a query parameter the SQL does not reference — Postgres cannot infer its type (`could not determine data type of parameter $N`).
 - Never reintroduce Vercel config (`vercel.json`, `NEXTAUTH_URL`, `AUTH_SECRET`) — this is a self-hosted Pi build.
 - Never ship a standalone build without copying `public/` and `.next/static/`.
 - Never seed a fresh appliance with `001_seed.sql` — use `002_local_appliance.sql`.

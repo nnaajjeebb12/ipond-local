@@ -27,7 +27,7 @@ Work top to bottom. Tick each box as you go.
 | [8. Run as a service](#8-run-it-as-a-service-systemd) | Auto-start on boot | 15 min |
 | [9. Web access](#9-put-it-on-port-80-nginx) | Reach it from any device | 10 min |
 | [10. Background jobs](#10-schedule-the-background-jobs-cron) | Alerts + cloud sync | 10 min |
-| [11. Connect the ESP32](#11-point-the-esp32-at-the-pi) | Point sensors at the Pi | 15 min |
+| [11. Connect the gateway](#11-connect-the-esp32-gateway-usb) | USB serial listener | 20 min |
 | [12. Final checks](#12-final-acceptance-test) | Prove it all works | 15 min |
 
 ---
@@ -69,25 +69,30 @@ Read this once. You do not need to memorise it.
 - [ ] Ethernet cable to the site router — **strongly preferred over Wi-Fi** for
       an always-on appliance
 - [ ] A laptop on the same network, to do the setup over SSH
-- [ ] The ESP32 gateway(s) already installed at the ponds
+- [ ] The ESP32 gateway, plus a **USB data cable** long enough to reach the Pi
+- [ ] **Strongly recommended:** an external SSD or USB drive for the database.
+      SD cards wear out under constant database writes.
 
 ### 0.2 Information to collect
 
 Write these down now. You cannot finish without them.
 
-- [ ] **`API_TOKEN`** — the token already compiled into the ESP32 firmware.
-      It must match **exactly**, character for character.
+- [ ] **`API_TOKEN`** — any long random token. It guards the ingest endpoint
+      on the Pi's own network; the gateway no longer needs to know it (the
+      serial listener on the Pi supplies it).
 - [ ] **`SYNC_TOKEN`** — a **new, different** token for cloud sync. Ask
       Soletronix for it, or generate one in step 4 and send it to them.
       ⚠️ **It must not be the same as `API_TOKEN`.** They are deliberately
       separate so a compromised pond sensor cannot rewrite historical data, and
       a leaked sync token cannot impersonate a sensor.
 - [ ] **Client / site name** — as it should appear on the licence.
+- [ ] **`SYNC_OWNER_ID`** — this site's owner UUID on seeme-db.com. Ask
+      Soletronix. Without it the Pi can store readings but cannot sync them.
 - [ ] **Number of ponds** at this site (1–10).
 - [ ] **Repository URL** for this project.
-- [ ] A **fixed IP address** for the Pi, or a DHCP reservation on the router.
-      *(Ask whoever manages the site network. Without this, the Pi's address
-      can change and the ESP32s will stop finding it.)*
+- [ ] A **fixed IP address** for the Pi, or a DHCP reservation on the router
+      *(recommended, so staff can bookmark the dashboard — the gateway itself
+      does not need it, it is wired by USB)*.
 
 ### 0.3 The licence — start this first, it has a waiting time
 
@@ -283,6 +288,7 @@ cp .env.example .env
 
 ```bash
 openssl rand -hex 16   # use this for POSTGRES_PASSWORD
+openssl rand -hex 32   # use this for API_TOKEN
 openssl rand -hex 32   # use this for SYNC_TOKEN (only if Soletronix didn't give you one)
 ```
 
@@ -298,13 +304,15 @@ Fill in every value. The file should end up looking like this — replace
 everything in `<angle brackets>`:
 
 ```bash
-DATABASE_URL=postgresql://soletronix:<DB-PASSWORD>@localhost:5432/soletronix
+DATABASE_URL=postgresql://soletronix:<DB-PASSWORD>@localhost:5432/ipond
 
 POSTGRES_USER=soletronix
 POSTGRES_PASSWORD=<DB-PASSWORD>
-POSTGRES_DB=soletronix
+POSTGRES_DB=ipond
+DB_DATA_PATH=/mnt/ipond-data/timescaledb
 
-API_TOKEN=<EXACT token from the ESP32 firmware>
+API_TOKEN=<any long random token — see 4.1>
+SERIAL_PORT=/dev/ttyUSB0            # you will replace this in step 11.2
 
 TZ=Asia/Manila
 APP_TIMEZONE=Asia/Manila
@@ -312,6 +320,7 @@ NEXT_PUBLIC_APP_TIMEZONE=Asia/Manila
 
 SYNC_TOKEN=<the 64-character token from 4.1 — NOT the same as API_TOKEN>
 MAIN_SERVER_URL=https://seeme-db.com
+SYNC_OWNER_ID=<owner UUID from Soletronix>
 
 LICENSE_PATH=/home/pi/ipond-local/license.json
 ```
@@ -399,6 +408,32 @@ nothing else.
 
 ## 6. Start the database
 
+### 6.0 Prepare the data drive
+
+The database writes constantly, and SD cards die under that load. Put the data
+on an external SSD/USB drive if you have one; if not, the Pi's card will do for
+a small site but expect to replace it.
+
+**With an external drive** (mounted at `/mnt/ipond-data`; ask Soletronix for a
+mounting guide if unsure):
+
+```bash
+sudo mkdir -p /mnt/ipond-data/timescaledb
+sudo chown -R 1000:1000 /mnt/ipond-data
+```
+
+**Without one** — edit `.env` and change `DB_DATA_PATH` to:
+
+```bash
+DB_DATA_PATH=/home/pi/ipond-data/timescaledb
+```
+
+then:
+
+```bash
+mkdir -p /home/pi/ipond-data/timescaledb
+```
+
 ### 6.1 Start the container
 
 ```bash
@@ -408,7 +443,7 @@ docker compose up -d
 
 - [ ] The first run downloads about 400 MB. Allow **5–15 minutes**.
 
-> **You should see:** `Container soletronix-timescaledb  Started`
+> **You should see:** `Container ipond-timescaledb  Started`
 >
 > ⚠️ **If you see `no matching manifest for linux/arm64`**, this Pi's
 > architecture has no prebuilt TimescaleDB image for the pinned version.
@@ -419,7 +454,7 @@ docker compose up -d
 ### 6.2 Wait for it to be ready
 
 ```bash
-docker exec soletronix-timescaledb pg_isready -U soletronix
+docker exec ipond-timescaledb pg_isready -U soletronix
 ```
 
 Repeat until it responds. The first start also creates all the database tables,
@@ -430,8 +465,8 @@ which takes an extra 10–30 seconds after the container appears.
 ### 6.3 Confirm the tables were created
 
 ```bash
-docker exec soletronix-timescaledb \
-  psql -U soletronix -d soletronix -c "\dt"
+docker exec ipond-timescaledb \
+  psql -U soletronix -d ipond -c "\dt"
 ```
 
 > **You should see:** a table listing including `sensor_readings`, `ponds`,
@@ -444,8 +479,8 @@ Until you do this step every ESP32 reading is rejected with `unknown_pond`.
 
 ```bash
 cd $APP_DIR
-docker exec -i soletronix-timescaledb \
-  psql -U soletronix -d soletronix < db/seeds/002_local_appliance.sql
+docker exec -i ipond-timescaledb \
+  psql -U soletronix -d ipond < db/seeds/002_local_appliance.sql
 ```
 
 > **You should see:** `owners=1 ponds=10 thresholds=40`
@@ -700,69 +735,160 @@ tail -5 /home/pi/logs/sync-worker.log
 
 ---
 
-## 11. Point the ESP32 at the Pi
+## 11. Connect the ESP32 gateway (USB)
 
-Until now the sensors have been sending to the cloud. They must now send to the
-Pi instead.
+The gateway has **no Wi-Fi**. It sends readings to the Pi down a USB cable, and
+a small program on the Pi — the *serial listener* — forwards each reading into
+the app. Nothing needs the Pi's IP address any more.
 
-### 11.1 Find the Pi's address
+### 11.1 Plug it in and find it
 
-```bash
-hostname -I
-```
-
-> **You should see:** something like `192.168.1.50`
-
-- [ ] Make sure this address is **reserved** on the router (step 0.2). If it
-      changes later, the sensors silently stop reporting.
-
-### 11.2 Update the firmware
-
-In the Arduino IDE, open the gateway sketch
-(`esp32_iotgateway_new_soletronix.ino`) and change line 13:
-
-```cpp
-// from:
-const char *serverName = "https://seeme-db.com/api/send-sensor-data";
-// to (use YOUR Pi's address):
-const char *serverName = "http://192.168.1.50/api/send-sensor-data";
-```
-
-⚠️ Note `http`, not `https` — the Pi serves plain HTTP on the local network.
-
-- [ ] Confirm the `API_TOKEN` in the firmware matches the one in `.env` exactly.
-- [ ] Upload to each ESP32 gateway.
-
-### 11.3 Verify a real reading arrives
-
-Wait for one reporting interval (up to 15 minutes), then:
+- [ ] Connect the ESP32 gateway to any USB port on the Pi with a **data** cable
+      (some cheap cables are charge-only and will not work).
 
 ```bash
-docker exec soletronix-timescaledb psql -U soletronix -d soletronix \
+ls -l /dev/serial/by-id/
+```
+
+> **You should see:** one entry, something like
+> `usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0 -> ../../ttyUSB0`
+>
+> If the folder is empty or missing: unplug, wait 5 seconds, plug back in, run
+> again. Still nothing → try a different cable.
+
+- [ ] Copy the **full `by-id` name** — the long `usb-…` part. You will use it
+      in the next step.
+
+⚠️ **Do not use `/dev/ttyUSB0` directly.** That number can change when other
+USB devices are plugged in or after a reboot. The `by-id` name is tied to the
+specific gateway and never changes.
+
+### 11.2 Tell the app which port to use
+
+```bash
+cd $APP_DIR
+nano .env
+```
+
+Find the `SERIAL_PORT=` line and set it to the by-id path:
+
+```bash
+SERIAL_PORT=/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0
+```
+
+- [ ] Save: `Ctrl+O`, `Enter`, `Ctrl+X`.
+
+### 11.3 Let the `pi` user talk to serial devices
+
+```bash
+sudo usermod -aG dialout pi
+```
+
+- [ ] **Log out and back in** (`exit`, then `ssh pi@ipond.local`) — the change
+      does not apply to the current session.
+
+```bash
+groups | grep -c dialout
+```
+
+> **You should see:** `1`. If `0`, you did not log out and back in.
+
+### 11.4 Test the listener by hand
+
+```bash
+cd $APP_DIR
+npm run serial-listener
+```
+
+> **You should see:** `listening on /dev/serial/by-id/... @ 9600 baud`
+>
+> Then, within one reporting interval (up to 15 minutes), a line per reading:
+> `pond 3 -> 201 (1 total)`
+
+Leave it running until you see at least one `-> 201`, then press `Ctrl+C`.
+
+If you see `cannot open ...: Permission denied` → step 11.3.
+If you see `cannot open ...: No such file` → the by-id path in `.env` is wrong;
+re-check step 11.1.
+If it says `listening` but nothing ever arrives → the gateway is not sending.
+Its LCD should show *"Sent to Pi (USB)"* after each reading; if it shows
+*"Json String Fail"* the sensor board is the problem, not the Pi.
+
+### 11.5 Run the listener as a service
+
+```bash
+sudo nano /etc/systemd/system/ipond-serial.service
+```
+
+Paste **exactly**:
+
+```ini
+[Unit]
+Description=Soletronix iPond USB serial listener
+After=ipond.service
+Requires=ipond.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/ipond-local/i-pond-frontend
+EnvironmentFile=/home/pi/ipond-local/i-pond-frontend/.env
+ExecStart=/usr/bin/node /home/pi/ipond-local/i-pond-frontend/scripts/serial-listener.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- [ ] Save: `Ctrl+O`, `Enter`, `Ctrl+X`.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ipond-serial
+sudo systemctl status ipond-serial
+```
+
+> **You should see:** `Active: active (running)`. Press `q` to exit.
+
+> **Why `Restart=always` matters here:** if the USB cable is knocked out or the
+> gateway resets, the listener deliberately **exits**. systemd then restarts it
+> every 3 seconds until the port is back. Plug the cable back in and it recovers
+> on its own — no one has to touch the Pi.
+
+### 11.6 Verify readings are landing
+
+```bash
+sudo journalctl -u ipond-serial -f
+```
+
+Wait for a `-> 201` line, then `Ctrl+C`. Then confirm in the database:
+
+```bash
+docker exec ipond-timescaledb psql -U soletronix -d ipond \
   -c "SELECT time, pond_id, temperature, ph FROM sensor_readings ORDER BY time DESC LIMIT 5;"
 ```
 
 > **You should see:** rows with recent timestamps.
 
-You can also watch every incoming request — including rejected ones — at
+Every forwarded reading — including rejected ones — is also visible at
 **`http://ipond.local/admin/logs`**.
 
-### 11.4 Test without waiting (optional)
+### 11.7 Test without the gateway (optional)
 
-To confirm the endpoint works before the sensors report:
+The listener can read from the keyboard instead of the USB port, which lets you
+prove the whole pipeline before the gateway is even wired up:
 
 ```bash
 cd $APP_DIR
-TOKEN=$(grep '^API_TOKEN=' .env | cut -d= -f2)
-curl -s -X POST http://localhost:3000/api/send-sensor-data \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"data":{"pnd":1,"rtd":28.5,"ph":7.2,"sal":15.0,"dox":6.8}}'
+echo '{"data":{"pnd":1,"rtd":28.5,"ph":7.2,"sal":15.0,"dox":6.8}}' \
+  | SERIAL_PORT=- npm run serial-listener
 ```
 
-> **You should see:** `{"ok":true}`
-> - `{"error":"unauthorized"}` → the token does not match
-> - `{"error":"unknown_pond"}` → you skipped step 6.4
+> **You should see:** `pond 1 -> 201 (1 total)`
+> - `-> 401 {"error":"unauthorized"}` → `API_TOKEN` in `.env` is missing or malformed
+> - `-> 404 {"error":"unknown_pond"}` → you skipped step 6.4
+> - `POST failed (is the app running?)` → `sudo systemctl status ipond`
 
 ---
 
@@ -773,6 +899,8 @@ Tick every box. If any fails, do not hand the system over.
 - [ ] **Dashboard loads, styled** — `http://ipond.local` shows the sidebar and
       pond cards in colour
 - [ ] **Ponds are listed** — the dashboard shows your ponds, not "No ponds"
+- [ ] **Serial listener running** — `sudo systemctl status ipond-serial` is
+      `active (running)`
 - [ ] **Live data** — at least one pond shows a recent reading
 - [ ] **Charts draw** — click a pond, then a sensor; a line chart appears
 - [ ] **Licence valid** — `curl localhost:3000/api/license` → `"valid":true`
@@ -781,6 +909,9 @@ Tick every box. If any fails, do not hand the system over.
 - [ ] **Manual sync works** — click **Sync to Cloud**; it reports a result
 - [ ] **Survives reboot** — `sudo reboot`, wait 2 min, dashboard loads with no
       intervention
+- [ ] **Unplug test** — pull the gateway's USB cable, wait 10 s, plug it back
+      in; `sudo systemctl status ipond-serial` returns to `active (running)`
+      by itself
 - [ ] **Cron is scheduled** — `crontab -l` shows both lines
 - [ ] **Logs are filling** — `ls -l /home/pi/logs/` shows both files growing
 - [ ] **Database port is closed to the outside** —
@@ -800,6 +931,23 @@ Tick every box. If any fails, do not hand the system over.
 
 ## Routine maintenance
 
+### If this Pi was set up before September 14, 2026
+
+The database compose file moved from the repository root into
+`i-pond-frontend/`. Docker names its project after the directory, so the old
+container must be released once. **Your data is safe** — it lives in
+`/mnt/ipond-data`, not inside the container.
+
+```bash
+cd /home/pi/ipond-local
+docker compose -p ipond-local down
+cd i-pond-frontend
+grep POSTGRES_PASSWORD .env      # must be the password the DB was created with
+docker compose up -d
+```
+
+Do this once, then use the normal update steps below.
+
 ### Updating to a new version
 
 ```bash
@@ -817,8 +965,8 @@ If the update notes mention a new database migration:
 
 ```bash
 cd $APP_DIR
-docker exec -i soletronix-timescaledb \
-  psql -U soletronix -d soletronix < db/migrations/0XX_name.sql
+docker exec -i ipond-timescaledb \
+  psql -U soletronix -d ipond < db/migrations/0XX_name.sql
 ```
 
 Apply migrations **before** restarting the service.
@@ -827,8 +975,8 @@ Apply migrations **before** restarting the service.
 
 ```bash
 mkdir -p /home/pi/backups
-docker exec soletronix-timescaledb \
-  pg_dump -U soletronix -d soletronix | gzip > /home/pi/backups/ipond-$(date +%F).sql.gz
+docker exec ipond-timescaledb \
+  pg_dump -U soletronix -d ipond | gzip > /home/pi/backups/ipond-$(date +%F).sql.gz
 ```
 
 - [ ] Copy backups off the Pi periodically. An SD card is not a safe archive.
@@ -840,8 +988,10 @@ docker exec soletronix-timescaledb \
 | Is the app running? | `sudo systemctl status ipond` |
 | App logs, live | `sudo journalctl -u ipond -f` |
 | Restart the app | `sudo systemctl restart ipond` |
+| Is the gateway being heard? | `sudo journalctl -u ipond-serial -n 20` |
+| Restart the listener | `sudo systemctl restart ipond-serial` |
 | Is the database up? | `docker ps` |
-| Database logs | `docker logs soletronix-timescaledb --tail 50` |
+| Database logs | `docker logs ipond-timescaledb --tail 50` |
 | Sync log | `tail -20 /home/pi/logs/sync-worker.log` |
 | Alert log | `tail -20 /home/pi/logs/alert-worker.log` |
 | How many readings? | `curl -s localhost:3000/api/health` |
@@ -880,13 +1030,36 @@ you are on 64-bit (`uname -m` → `aarch64`). If you are, contact Soletronix
 before changing anything — the app needs TimescaleDB specifically and swapping
 in plain PostgreSQL will break the charts and utilization pages.
 
-### Dashboard says "No ponds" / ESP32 gets `unknown_pond`
+### No readings arriving
+
+```bash
+sudo systemctl status ipond-serial
+sudo journalctl -u ipond-serial -n 30 --no-pager
+```
+
+| Log says | Meaning | Fix |
+|---|---|---|
+| `cannot open ...: No such file` | Wrong `SERIAL_PORT` | Step 11.1 – 11.2 |
+| `cannot open ...: Permission denied` | `pi` not in `dialout` | Step 11.3, then log out/in |
+| `listening on ...` but nothing else | Gateway not sending | Check its LCD; check the cable is a data cable |
+| `not JSON, skipped` repeatedly | Baud mismatch | Firmware uses 9600 — do not change `SERIAL_BAUD` |
+| `-> 404 unknown_pond` | Ponds not seeded | Step 6.4 |
+| `POST failed (is the app running?)` | App down | `sudo systemctl status ipond` |
+
+### Sync says `pond_mismatch`
+
+The main server does not recognise this site's ponds. Nothing has been lost —
+the readings stay pending on the Pi. Either `SYNC_OWNER_ID` in `.env` is wrong,
+or Soletronix has not yet created ponds `PND-001`… under that owner on
+seeme-db.com. Contact them with the value in your `.env`.
+
+### Dashboard says "No ponds" / listener gets `unknown_pond`
 
 The seed did not run. Redo **step 6.4**, and check you used
 `002_local_appliance.sql`.
 
 ```bash
-docker exec soletronix-timescaledb psql -U soletronix -d soletronix \
+docker exec ipond-timescaledb psql -U soletronix -d ipond \
   -c "SELECT id, pond_code, name FROM ponds ORDER BY id;"
 ```
 
@@ -895,7 +1068,7 @@ docker exec soletronix-timescaledb psql -U soletronix -d soletronix \
 ```bash
 docker ps                                    # is the container listed?
 docker compose up -d                         # start it if not
-docker logs soletronix-timescaledb --tail 30 # why did it stop?
+docker logs ipond-timescaledb --tail 30 # why did it stop?
 ```
 
 Most common cause: `POSTGRES_PASSWORD` and the password inside `DATABASE_URL`
@@ -954,7 +1127,8 @@ setups do not resolve `.local` names.
 | Settings | `/home/pi/ipond-local/i-pond-frontend/.env` |
 | Licence | `/home/pi/ipond-local/license.json` |
 | Server that actually runs | `…/i-pond-frontend/.next/standalone/server.js` |
-| Database files | Docker volume `i-pond-frontend_timescaledb_data` |
+| Database files | `DB_DATA_PATH` from `.env` (default `/mnt/ipond-data/timescaledb`) |
+| Serial listener service | `/etc/systemd/system/ipond-serial.service` |
 | Job logs | `/home/pi/logs/` |
 | Service definition | `/etc/systemd/system/ipond.service` |
 | Web server config | `/etc/nginx/sites-available/ipond` |
@@ -965,7 +1139,8 @@ setups do not resolve `.local` names.
 |---|---|---|
 | 80 | Dashboard (nginx) | Site network |
 | 3000 | The app itself | Pi only |
-| 5432 | Database | Pi only — **never open this to the internet** |
+| 5432 | Database | Bound to `127.0.0.1` only — **never open this to the internet** |
+| USB | ESP32 gateway → serial listener | Physical cable only |
 
 ---
 
