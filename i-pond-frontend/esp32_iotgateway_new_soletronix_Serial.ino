@@ -1,39 +1,14 @@
 // ============================================================================
-// ESP32 IoT GATEWAY - SOLETRONIX
+// ESP32 IoT GATEWAY - SOLETRONIX (USB-WIRED, NO WIFI)
 // ============================================================================
-// Receives sensor JSON over Serial2, displays on LCD, POSTs to cloud.
-// ============================================================================
-
-// ============================================================================
-// CONFIG ZONE - SAFE TO EDIT
-// ============================================================================
-
-const char *ssid = "rmc";
-const char *password = "12341234";
-const char *serverName = "https://seeme-db.com/api/send-sensor-data";
-const char *authToken = "ce1e4a9a8d596bf1f2c046efaa21355ba4bacbdf1c66c3055530ed2958d32a74c68128383bbb21717886889a1d29c9a9263a762d581c6779e92bd915f9115d7efc20c5f9fcb80f2adf58162ef16d4dccaddc0486241991f30e634d45f7c146bb24aa4b172f4426fba3879e56f76fddd410823930e99d5d640014c141b280dc7c";
-
-const uint32_t WIFI_CONNECT_TIMEOUT_MS = 10000;
-const uint32_t POST_DELAY_MS = 5000;
-
-// SD card CS pin is defined as SD_CS_PIN = 5
-// Change if your wiring is different
-
-// ============================================================================
-// CRITICAL ZONE - DO NOT EDIT BELOW
+// Receives sensor JSON over Serial2, displays on LCD, forwards JSON over
+// USB Serial to the Raspberry Pi. No WiFi, no HTTP, no SD backlog.
 // ============================================================================
 
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include "GravityRtc.h"
-#include <WiFi.h>
-#include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <SD.h>
-#include <SPI.h>
-
-// SD card chip select pin: verify against your wiring
-#define SD_CS_PIN 5
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 GravityRtc rtc;
@@ -50,10 +25,6 @@ void lcdLine(uint8_t row, const String &msg)
 {
   lcd.setCursor(0, row);
   lcd.print(msg);
-  if (msg.length() > 0)
-  {
-    Serial.println("[LCD L" + String(row) + "] " + msg);
-  }
 }
 
 void lcdShow(const String &l0, const String &l1 = "", const String &l2 = "", const String &l3 = "")
@@ -85,51 +56,7 @@ void printToLCD()
   lcd.setCursor(8, 1);
   lcd.print("DO:");
   lcd.print(dox);
-  lcdLine(2, "Json Parse Success");
-
-  // Mirror to Serial
-  Serial.println("=== SENSOR DATA ===");
-  Serial.print("Temperature: ");
-  Serial.println(rtd);
-  Serial.print("pH:          ");
-  Serial.println(ph);
-  Serial.print("Salinity:    ");
-  Serial.println(sal);
-  Serial.print("Dissolved O2:");
-  Serial.println(dox);
-  Serial.print("Pond:        ");
-  Serial.println(pnd);
-  Serial.println("===================");
-}
-
-// ----------------------------------------------------------------------------
-// WIFI
-// ----------------------------------------------------------------------------
-
-void connectWiFi()
-{
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting");
-  lcdShow("Connecting...");
-
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS)
-  {
-    delay(500);
-    Serial.print(".");
-  }
-
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    Serial.print("\nConnected. IP: ");
-    Serial.println(WiFi.localIP());
-    lcdShow("Connected to Wifi!");
-  }
-  else
-  {
-    lcdShow("Connection Timeout", "", "Local-Only Mode");
-  }
-  delay(2000);
+  lcdLine(2, "Sent to Pi (USB)");
 }
 
 // ----------------------------------------------------------------------------
@@ -155,155 +82,15 @@ String extractJson(const String &raw)
 }
 
 // ----------------------------------------------------------------------------
-// HTTP POST
+// SEND OVER USB SERIAL (replaces HTTP POST)
 // ----------------------------------------------------------------------------
 
-void sendToServer(const String &payload)
+void sendToPi()
 {
-  if (deserializeJson(jsonDoc, payload))
-  {
-    lcdShow("", "", "Data Invalid", "Data not Sent");
-    return;
-  }
-
-  HTTPClient http;
-  http.begin(serverName);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", "Bearer " + String(authToken));
-
-  float fPnd = jsonDoc["pnd"];
-  float fRtd = jsonDoc["rtd"];
-  float fPh = jsonDoc["ph"];
-  float fSal = jsonDoc["sal"];
-  float fDox = jsonDoc["dox"];
-
   char body[120];
   sprintf(body, "{\"data\":{\"pnd\":%.2f,\"rtd\":%.2f,\"ph\":%.2f,\"sal\":%.2f,\"dox\":%.2f}}",
-          fPnd, fRtd, fPh, fSal, fDox);
+          (float)pnd, rtd, ph, sal, dox);
   Serial.println(body);
-
-  int code = http.POST(body);
-  if (code == 200 || code == 201 || code == 202)
-  {
-    Serial.printf("HTTP OK: %d\n", code);
-    Serial.println(http.getString());
-    lcdShow("", "", "HTTP Response: " + String(code), "Sent to cloud");
-  }
-  else
-  {
-    Serial.printf("HTTP ERR: %d\n", code);
-    lcdShow("", "Error code: " + String(code), "Failed to send", "Saving to SD...");
-    // Save to SD on failure (same payload format as sent above)
-    saveToSD((int)fPnd, String(body));
-  }
-  http.end();
-  delay(2000);
-}
-
-// ----------------------------------------------------------------------------
-// SD CARD BACKLOG
-// ----------------------------------------------------------------------------
-
-bool sdAvailable = false; // set true in setup if SD.begin() passes
-
-void saveToSD(int pondNum, const String &payload)
-{
-  if (!sdAvailable)
-  {
-    Serial.println("SD not available, cannot save backlog");
-    return;
-  }
-
-  String dir = "/pond" + String(pondNum);
-  String filename = dir + "/" + String(millis()) + ".txt";
-
-  File f = SD.open(filename.c_str(), FILE_WRITE);
-  if (!f)
-  {
-    Serial.println("SD write failed: " + filename);
-    lcdLine(3, "SD save failed");
-    return;
-  }
-  f.println(payload);
-  f.close();
-  Serial.println("Saved to SD: " + filename);
-  lcdLine(3, "Saved to SD");
-}
-
-void replayBacklog()
-{
-  if (!sdAvailable)
-    return;
-
-  Serial.println("Checking SD backlog...");
-  lcdShow("Checking", "SD Backlog...");
-
-  int replayed = 0;
-  int failed = 0;
-
-  for (int i = 1; i <= 5; i++)
-  {
-    String dir = "/pond" + String(i);
-    File d = SD.open(dir.c_str());
-    if (!d || !d.isDirectory())
-      continue;
-
-    File entry = d.openNextFile();
-    while (entry)
-    {
-      if (!entry.isDirectory())
-      {
-        String filename = dir + "/" + String(entry.name());
-        String payload = "";
-        while (entry.available())
-          payload += (char)entry.read();
-        payload.trim();
-        entry.close();
-
-        if (payload.length() > 10)
-        {
-          Serial.println("Replaying: " + filename);
-          lcdShow("Replaying", filename.substring(0, 20));
-
-          // Re-use sendToServer logic inline
-          HTTPClient http;
-          http.begin(serverName);
-          http.addHeader("Content-Type", "application/json");
-          http.addHeader("Authorization", "Bearer " + String(authToken));
-          int code = http.POST(payload);
-          http.end();
-
-          if (code == 200 || code == 201 || code == 202)
-          {
-            Serial.println("Replay OK: " + filename);
-            SD.remove(filename.c_str());
-            replayed++;
-          }
-          else
-          {
-            Serial.println("Replay failed: " + String(code));
-            failed++;
-          }
-          delay(1000);
-        }
-      }
-      entry = d.openNextFile();
-    }
-  }
-
-  Serial.printf("Backlog: %d replayed, %d failed\n", replayed, failed);
-  if (replayed > 0 || failed > 0)
-  {
-    lcdShow("Backlog done",
-            "Sent: " + String(replayed),
-            "Failed: " + String(failed));
-    delay(2000);
-  }
-  else
-  {
-    lcdShow("No Backlogs");
-    delay(1000);
-  }
 }
 
 // ----------------------------------------------------------------------------
@@ -314,7 +101,6 @@ void handleSerialInput()
 {
   String val = Serial2.readString();
   val.trim();
-  Serial.println(val);
 
   if (val == "P1" || val == "p1")
   {
@@ -325,7 +111,9 @@ void handleSerialInput()
   if (val.length() <= 10)
     return;
 
-  if (deserializeJson(jsonDoc, val))
+  String json = extractJson(val);
+
+  if (deserializeJson(jsonDoc, json))
   {
     displayLCDError();
     return;
@@ -334,27 +122,9 @@ void handleSerialInput()
   deserializeToGlobals();
   delay(200);
   printToLCD();
-  delay(POST_DELAY_MS);
   rtc.read();
 
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    Serial.println("WiFi down, saving to SD");
-    lcdLine(2, "WiFi down");
-    lcdLine(3, "Saving to SD...");
-    delay(500);
-    // Build payload string to save (same format as body in sendToServer)
-    char body[120];
-    sprintf(body, "{\"data\":{\"pnd\":%.2f,\"rtd\":%.2f,\"ph\":%.2f,\"sal\":%.2f,\"dox\":%.2f}}",
-            (float)pnd, rtd, ph, sal, dox);
-    saveToSD(pnd, String(body));
-    delay(2000);
-    return;
-  }
-
-  lcdShow("", "", "", "sending to cloud");
-  delay(2000);
-  sendToServer(extractJson(val));
+  sendToPi();
 }
 
 // ----------------------------------------------------------------------------
@@ -367,63 +137,19 @@ void setup()
   lcd.init();
   lcd.backlight();
 
-  connectWiFi();
-
   rtc.setup();
   rtc.read();
 
-  // SD Card Init
-  sdAvailable = SD.begin(SD_CS_PIN);
-  if (!sdAvailable)
-  {
-    Serial.println("SD card not found or failed to init");
-    lcdShow("SD Card", "Not Found!", "Continuing...", "No backlog");
-    delay(2000);
-  }
-  else
-  {
-    Serial.println("SD card OK");
-    lcdShow("SD Card OK");
-    delay(1000);
-    // Create pond directories if missing
-    for (int i = 1; i <= 5; i++)
-    {
-      String dir = "/pond" + String(i);
-      if (!SD.exists(dir.c_str()))
-      {
-        SD.mkdir(dir.c_str());
-      }
-    }
-  }
-
   Serial2.begin(9600);
   delay(1000);
-  lcdShow("Finished Set-up");
+  lcdShow("Finished Set-up", "", "USB Mode - No WiFi");
   delay(2000);
 
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    replayBacklog();
-  }
-
   lcd.clear();
-  delay(3000);
 }
-
-bool wasConnected = false; // tracks WiFi state across loops for reconnect replay
 
 void loop()
 {
-  bool nowConnected = (WiFi.status() == WL_CONNECTED);
-
-  // Detect reconnection
-  if (nowConnected && !wasConnected)
-  {
-    Serial.println("WiFi reconnected: replaying backlog");
-    replayBacklog();
-  }
-  wasConnected = nowConnected;
-
   if (Serial2.available())
   {
     handleSerialInput();

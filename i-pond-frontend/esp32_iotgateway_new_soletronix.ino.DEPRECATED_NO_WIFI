@@ -10,8 +10,8 @@
 
 const char *ssid = "rmc";
 const char *password = "12341234";
-const char *serverName = "https://seeme-db.com/api/send-sensor-data";
-const char *authToken = "ce1e4a9a8d596bf1f2c046efaa21355ba4bacbdf1c66c3055530ed2958d32a74c68128383bbb21717886889a1d29c9a9263a762d581c6779e92bd915f9115d7efc20c5f9fcb80f2adf58162ef16d4dccaddc0486241991f30e634d45f7c146bb24aa4b172f4426fba3879e56f76fddd410823930e99d5d640014c141b280dc7c";
+const char *serverName = "http://192.168.1.43/api/send-sensor-data";
+const char *authToken = "d1a43d7e55abc5bb969de73dc40aa927e0725264730990bd72e21e088ddb5b1b";
 
 const uint32_t WIFI_CONNECT_TIMEOUT_MS = 10000;
 const uint32_t POST_DELAY_MS = 5000;

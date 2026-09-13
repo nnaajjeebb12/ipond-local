@@ -53,6 +53,7 @@ type ReadingRow = {
 	/** ISO-8601 UTC with 6 fractional digits, straight from Postgres. */
 	time_iso: string;
 	pond_id: number;
+	pond_code: string | null;
 	temperature: number | null;
 	ph: number | null;
 	salinity: number | null;
@@ -139,11 +140,12 @@ export async function lastSyncAt(pool: Pool): Promise<string | null> {
 
 async function fetchBatch(pool: Pool): Promise<ReadingRow[]> {
 	const { rows } = await pool.query<ReadingRow>(
-		`SELECT to_char(time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS time_iso,
-            pond_id, temperature, ph, salinity, dissolved_oxygen
-       FROM sensor_readings
+		`SELECT to_char(sr.time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS time_iso,
+            sr.pond_id, p.pond_code, temperature, ph, salinity, dissolved_oxygen
+       FROM sensor_readings sr
+       LEFT JOIN ponds p ON p.id = sr.pond_id
       WHERE synced_at IS NULL
-      ORDER BY time ASC
+      ORDER BY sr.time ASC
       LIMIT ${BATCH_SIZE}`
 	);
 	return rows;
@@ -241,9 +243,11 @@ export async function runSync(
 		if (batch.length === 0) break;
 		batches += 1;
 
+		const ownerId = process.env.SYNC_OWNER_ID;
 		const readings = batch.map((r) => ({
 			time: r.time_iso,
-			pond_id: r.pond_id,
+			owner_id: ownerId,
+			pond_code: r.pond_code,
 			temperature: r.temperature,
 			ph: r.ph,
 			salinity: r.salinity,
