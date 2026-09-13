@@ -70,6 +70,17 @@ export function syncTarget(): string {
 	return (process.env.MAIN_SERVER_URL || DEFAULT_TARGET).replace(/\/+$/, "");
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Everything the worker needs to run, or the first thing that is missing. */
+export function syncConfig(): { configured: boolean; missing: string | null } {
+	if (!process.env.SYNC_TOKEN) return { configured: false, missing: "SYNC_TOKEN" };
+	if (!process.env.SYNC_OWNER_ID || !UUID_RE.test(process.env.SYNC_OWNER_ID)) {
+		return { configured: false, missing: "SYNC_OWNER_ID" };
+	}
+	return { configured: true, missing: null };
+}
+
 /**
  * fetch with a timeout that is actually cancelled on completion.
  *
@@ -109,16 +120,16 @@ async function probe(url: string, timeoutMs: number): Promise<boolean> {
  * Distinguishes "no internet" from "internet up, main server down" — the two
  * cases need different action from whoever reads the dashboard.
  */
-export async function checkOnline(): Promise<OnlineCheck> {
+export async function checkOnline(timeoutMs: number = PROBE_TIMEOUT_MS): Promise<OnlineCheck> {
 	const target = syncTarget();
 
-	if (await probe(`${target}/api/health`, PROBE_TIMEOUT_MS)) {
+	if (await probe(`${target}/api/health`, timeoutMs)) {
 		return { online: true, serverReachable: true, detail: `${target} reachable` };
 	}
 
 	// Cloudflare's certificate covers the 1.1.1.1 literal, so this is a plain
 	// HTTPS reachability check with no DNS dependency.
-	if (await probe("https://1.1.1.1", PROBE_TIMEOUT_MS)) {
+	if (await probe("https://1.1.1.1", timeoutMs)) {
 		return {
 			online: true,
 			serverReachable: false,
@@ -144,17 +155,36 @@ export async function lastSyncAt(pool: Pool): Promise<string | null> {
 	return t ? new Date(t).toISOString() : null;
 }
 
+/**
+ * Only rows that CAN be sent: the pond must exist and carry a pond_code. A
+ * single row without one would be rejected by the receiver as a 400 for the
+ * whole batch, and because batches are taken in time order that same batch
+ * would be retried every run — one bad row would wedge sync forever.
+ */
 async function fetchBatch(pool: Pool): Promise<ReadingRow[]> {
 	const { rows } = await pool.query<ReadingRow>(
 		`SELECT to_char(sr.time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS time_iso,
             sr.pond_id, p.pond_code, temperature, ph, salinity, dissolved_oxygen
        FROM sensor_readings sr
-       LEFT JOIN ponds p ON p.id = sr.pond_id
-      WHERE synced_at IS NULL
+       JOIN ponds p ON p.id = sr.pond_id
+      WHERE sr.synced_at IS NULL
+        AND p.pond_code IS NOT NULL
       ORDER BY sr.time ASC
       LIMIT ${BATCH_SIZE}`
 	);
 	return rows;
+}
+
+/** Pending rows that fetchBatch will never pick up. Surfaced, never silently dropped. */
+export async function countUnsyncable(pool: Pool): Promise<number> {
+	const { rows } = await pool.query<{ n: string }>(
+		`SELECT COUNT(*)::text AS n
+       FROM sensor_readings sr
+       LEFT JOIN ponds p ON p.id = sr.pond_id
+      WHERE sr.synced_at IS NULL
+        AND (p.id IS NULL OR p.pond_code IS NULL)`
+	);
+	return Number(rows[0]?.n ?? 0);
 }
 
 async function markSynced(pool: Pool, batch: ReadingRow[]): Promise<number> {
@@ -207,11 +237,12 @@ export async function runSync(
 	// Without the owner the cloud cannot resolve a single pond. It would still
 	// answer 200 with everything skipped, and we would then mark every row as
 	// synced — silent data loss. Refuse to run instead.
-	const ownerId = process.env.SYNC_OWNER_ID;
-	if (!ownerId || !/^[0-9a-f-]{36}$/i.test(ownerId)) {
-		log("SYNC_OWNER_ID is not set or not a UUID — nothing to do");
-		return result("not_configured", "SYNC_OWNER_ID is not set");
+	const cfg = syncConfig();
+	if (!cfg.configured) {
+		log(`${cfg.missing} is not set — nothing to do`);
+		return result("not_configured", `${cfg.missing} is not set`);
 	}
+	const ownerId = process.env.SYNC_OWNER_ID as string;
 
 	const target = syncTarget();
 
@@ -239,6 +270,18 @@ export async function runSync(
 	}
 
 	log(`online — ${pending} readings pending, target ${target}`);
+
+	try {
+		const unsyncable = await countUnsyncable(pool);
+		if (unsyncable > 0) {
+			log(
+				`${unsyncable} pending reading(s) belong to a pond with no pond_code and will be left behind — ` +
+					`fix the pond row (every pond needs a PND-### code) and they will ship on the next run`
+			);
+		}
+	} catch {
+		// diagnostic only
+	}
 
 	let synced = 0;
 	let batches = 0;

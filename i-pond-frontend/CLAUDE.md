@@ -78,7 +78,8 @@ No test suite. Verify changes via dev server + browser.
 - **Database**: TimescaleDB pg16 (Docker, `docker-compose.yml`)
 - **Migrations**: 16 files in `/db/migrations/` (001 → 016)
 - **Deploy**: Next.js `output: "standalone"` + systemd + Nginx + Docker (no Vercel — `vercel.json` deleted)
-- **ESP32 (current)**: `esp32_iotgateway_new_soletronix_Serial.ino` — **USB-wired, no Wi-Fi, no HTTP, no SD**. Prints one `{"data":{...}}` JSON line per reading over USB serial at 9600 baud. `scripts/serial-listener.js` on the Pi forwards each line to `POST /api/send-sensor-data`, so everything downstream is unchanged.
+- **ESP32 (current)**: `esp32_iotgateway_new_soletronix_Serial.ino` — **USB-wired, no Wi-Fi, no HTTP, no SD**. The RECEIVE path (Serial2 read, trim, `{}` extract, `length > 10`, `deserializeJson(jsonDoc, val)`, LCD layout, the 5 s LCD hold, `rtc.read()`) is copied verbatim from `esp32_iotgateway_old_code_working.ino` — do not "tidy" it, the sensor board timing depends on it. Only the SEND changed: `sendToPi()` prints one `{"data":{...}}` JSON line over USB serial at 9600 baud. `scripts/serial-listener.js` on the Pi forwards each line to `POST /api/send-sensor-data`. **Never `Serial.println` raw input** — anything starting with `{` on USB is treated as a reading.
+- **ESP32 (reference)**: `esp32_iotgateway_old_code_working.ino` — the last known-good Wi-Fi/SD build. Untouched; it is the source of truth for the receive path.
 - **ESP32 (deprecated)**: `esp32_iotgateway_new_soletronix.ino.DEPRECATED_NO_WIFI` — the old Wi-Fi/HTTP/SD-backlog variant, kept for reference only
 - **SD diagnostic**: `sd_card_test.ino` — standalone SD test (SD.h/SPI, CS GPIO5, 9600 baud). Tests in `runTests()`; type `run` in Serial Monitor (Newline ending) to re-run without reset
 
@@ -114,6 +115,7 @@ Local appliance, cron every 5min
 - `SYNC_TOKEN` is deliberately **not** `API_TOKEN`: a compromised ESP32 must not be able to bulk-write history, and a leaked sync token must not be able to pose as a sensor.
 - Target host env var is `MAIN_SERVER_URL` (default `https://seeme-db.com`).
 - The worker always **exits 0** — "no internet" is a normal outcome. Never call `process.exit()` straight after a failed fetch: it lands on a closing handle and aborts with a libuv assertion (exit 127) even on success.
+- `fetchBatch` INNER JOINs `ponds` and requires `pond_code IS NOT NULL`. A reading whose pond has no code is **left pending and counted** (`countUnsyncable`, shown in the sidebar as "cannot sync — pond has no code") instead of being sent — one such row would 400 the whole batch at the receiver and, because batches are time-ordered, wedge sync on that batch forever.
 - **On the wire a pond is `(owner_id, pond_code)`, never the local `pond_id`.** Every appliance numbers ponds 1..10 / PND-001..010; the multi-tenant cloud needs `SYNC_OWNER_ID` to tell sites apart. The worker refuses to run without it.
 - The receiver answers `{ ok, inserted, duplicate, unknown, skipped, received }`. `duplicate` = already there (safe to mark). `unknown` = no pond for that `(owner, code)` on the server (**NOT** there). **The worker marks nothing and returns `pond_mismatch` when `unknown > 0`** — marking would silently lose those readings forever. A receiver that omits `unknown` gets the old behaviour plus a loud log line.
 - The production receiver on seeme-db.com lives in its own repo; `src/app/api/sync/route.ts` here is the reference implementation of the same contract so the two sides cannot drift apart again.
@@ -212,6 +214,7 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - `GET /api/alerts` — full history
 - `GET /api/alerts/active` — unacknowledged
 - `POST /api/alerts/[id]/acknowledge`
+- `POST /api/alerts/acknowledge-all` — `{ ok, acknowledged }`
 
 ### Maintenance (open)
 - `GET /api/maintenance` — all requests
@@ -226,7 +229,7 @@ All pages are open — no session, no role gate. The license gate wraps them all
 
 ### Cloud sync
 - `POST /api/sync` — **main server only** (reference copy here). Bearer `SYNC_TOKEN`. Body `{ readings: [{ time, owner_id, pond_code, temperature, ph, salinity, dissolved_oxygen, source }] }`. Resolves `(owner_id, pond_code)` → `ponds.id` in SQL, bulk insert, `ON CONFLICT (pond_id, time) DO NOTHING`. Returns `{ ok, inserted, duplicate, unknown, skipped, received }`.
-- `GET /api/sync/status` — local. `{ lastSyncAt, pendingCount, online, serverReachable, configured }`. Connectivity probe cached 30s.
+- `GET /api/sync/status` — local. `{ lastSyncAt, pendingCount, unsyncableCount, online, serverReachable, configured, missing }`. `configured` requires BOTH `SYNC_TOKEN` and a UUID `SYNC_OWNER_ID`; `missing` names the first absent one. Probe timeout 3 s (vs the worker's 8 s) and cached 30 s, because an offline Pi is the normal case and the sidebar must not hang.
 - `POST /api/sync/trigger` — local. Runs `runSync` inline for the dashboard button; 409 while one is already running in-process.
 
 ### Debugging (open)
@@ -267,7 +270,10 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - **Sensor**: 7 consecutive out-of-range readings → INSERT `sensor_alerts` (re-alerts after acknowledge).
 - **Connectivity**: 20+ mins no data → INSERT `sensor_alerts` with `sensor='connectivity'` (auto-resolves on next data).
 - **Worker**: `scripts/alert-worker.ts`, cron `*/5 * * * *`.
-- **Popup**: shows ALL unacknowledged alerts on load, no time limit.
+- **Popup**: shows ALL unacknowledged alerts on load, no time limit. Two exits with different meanings — **Acknowledge** (server-side, clears the badge, shows as acknowledged in `/notifications`) and **Ignore** (this browser only: alert stays open on the server, still counted in the badge, still active in `/notifications`). Ignored ids persist in `localStorage` (`ipond.ignoredAlertIds`), pruned against the live list so a re-triggered alert (new id) still pops. "Ignore all" / "Acknowledge all" in the popup header; per-row and "Acknowledge all" on `/notifications` → Sensor Alerts.
+- **`POST /api/alerts/acknowledge-all`** — one UPDATE over every open alert, idempotent.
+- **Anything that acknowledges must call `refreshAlertViews()`** — the badge (`/api/notifications/unread-count`) is a separate SWR key and otherwise shows a stale count for up to a minute.
+- **There is NO unique index on open alerts** — migration 010 dropped `idx_sensor_alerts_active` on purpose so sensor alerts re-fire after acknowledgement. Any code that inserts an alert must guard with `NOT EXISTS (... acknowledged_at IS NULL)` like the worker does. `ON CONFLICT DO NOTHING` conflicts on nothing here. `/api/ponds/status` relied on it and spammed one connectivity alert per offline pond on every 30 s poll until fixed.
 
 ## Deployment (Raspberry Pi, standalone)
 
@@ -313,6 +319,8 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - Never commit a database password — `docker-compose.yml` reads it from `.env`.
 - Never make the serial listener swallow a port close — it must exit so systemd restarts it.
 - Never pass a query parameter the SQL does not reference — Postgres cannot infer its type (`could not determine data type of parameter $N`).
+- Never insert a `sensor_alerts` row without a `NOT EXISTS (... acknowledged_at IS NULL)` guard — there is no unique index to catch duplicates.
+- Never change the firmware's receive path — copy it from `old_code_working.ino` and only touch `sendToPi()`.
 - Never reintroduce Vercel config (`vercel.json`, `NEXTAUTH_URL`, `AUTH_SECRET`) — this is a self-hosted Pi build.
 - Never ship a standalone build without copying `public/` and `.next/static/`.
 - Never seed a fresh appliance with `001_seed.sql` — use `002_local_appliance.sql`.

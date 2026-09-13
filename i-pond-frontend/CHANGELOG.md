@@ -1,5 +1,32 @@
 # Changelog
 
+## [2026-09-14] — Firmware receive path restored, alert Ignore/Acknowledge all, sync hardening
+
+### Changed
+- **`esp32_iotgateway_new_soletronix_Serial.ino`** rewritten around the receive path from `esp32_iotgateway_old_code_working.ino`, copied verbatim: `Serial2.readString` → `trim` → `{}` extract → `length > 10` → `deserializeJson(jsonDoc, val)` → `deserializeToJSON` → `delay(200)` → `printToLCD` (old cursor layout, "Json Parse Success") → `delay(5000)` → `rtc.read()`, plus the `P1` branch. The previous serial build had changed several of these (parsed the extracted substring, dropped the 5 s hold, different LCD layout). Only the send changed: the SD-card and Wi-Fi block is replaced by `sendToPi()`, which does the old firmware's second parse of the extracted JSON and its exact `sprintf` of `{"data":{...}}`, then `Serial.println`s it. All SD/FS/SPI/WiFi/HTTP includes, credentials, the API token and 280 lines of SD helpers are gone. The old firmware's `Serial.println(val)` raw echo is removed — USB Serial is now the data link and anything starting with `{` is a reading.
+- **Alerts: Ignore all / Acknowledge all.** Popup header gets both; each card gets Ignore + Acknowledge. *Acknowledge* is server-side; *Ignore* is this-browser-only — the alert stays open on the server, still counts in the bell badge, still shows as active in `/notifications`. Ignored ids persist in `localStorage` and are pruned against the live list, so a reload does not nag and a re-triggered alert still pops.
+- **`/notifications` → Sensor Alerts can now acknowledge** — per-row buttons and an "Acknowledge all" above the table. Before this the popup was the *only* place an alert could be acknowledged, so "ignore" would have stranded alerts with no way to clear them.
+- **`POST /api/alerts/acknowledge-all`** — one idempotent UPDATE. **`refreshAlertViews()`** in `useAlerts` pokes the alert list AND the badge; both acknowledge paths call it.
+- **Sync — three real problems fixed:**
+  1. `/api/sync/status` reported `configured: true` on `SYNC_TOKEN` alone, so the dashboard showed an enabled Sync button while the worker refused with `not_configured` for a missing `SYNC_OWNER_ID`. Now `syncConfig()` checks both and the sidebar names what is missing.
+  2. One reading on a pond with no `pond_code` wedged sync permanently: the receiver 400s the whole batch, and time-ordered batching retried the same batch every run. `fetchBatch` now INNER JOINs ponds and requires a code; such rows stay pending, are counted (`countUnsyncable`) and shown in the sidebar, and everything else ships. Verified: 2 bad rows left behind, 2 good rows shipped, previously 0 shipped.
+  3. On a Pi with no internet — the normal case — `/api/sync/status` waited two 8 s probes before the sidebar could say "no internet". Status now probes with a 3 s timeout. Failure toasts stay until the next attempt instead of fading after 6 s.
+- **`/api/ponds/status` alert spam fixed.** Migration 010 dropped the unique index on open alerts (deliberately, so sensor alerts re-fire after acknowledgement), which left this route's `ON CONFLICT DO NOTHING` conflicting on nothing. Every dashboard load and every 30 s poll inserted a fresh connectivity alert per offline pond. Now guarded with `NOT EXISTS (... acknowledged_at IS NULL)`, the same check the worker uses. Verified: 5 polls → count unchanged; after acknowledgement exactly one re-alert per pond, then stable. It also now records the real offline gap (`-1` = never) instead of a hardcoded `0`, so the popup no longer says "0 minutes".
+
+### Files Modified
+- esp32_iotgateway_new_soletronix_Serial.ino
+- src/components/AlertPopup.tsx, src/app/notifications/page.tsx, src/hooks/useAlerts.ts
+- src/app/api/alerts/acknowledge-all/route.ts *(new)*
+- src/app/api/ponds/status/route.ts
+- src/lib/sync.ts, src/app/api/sync/status/route.ts, src/components/SyncStatus.tsx
+- CLAUDE.md
+
+### Notes
+- **The alert spam was found by accident.** The first end-to-end test of "Ignore all" kept re-showing the popup; instrumenting it showed the server had 52 open alerts while the popup had fetched 42 — ten connectivity alerts had been minted *during that page load* by the status poll. That is by-design behaviour for genuinely new alerts, but the count was climbing on every poll, which led to the missing index. On a real site with one gateway offline this would have produced hundreds of alerts per hour.
+- Verified in a real browser (Playwright): popup shows both buttons; Ignore all hides it, badge still counts them, hidden after reload and on `/notifications`; per-row acknowledge drops the count by one; Acknowledge all → 0 open and the badge clears immediately.
+- **Not done for the firmware:** compiled/flashed — no Arduino toolchain here. The receive path is a verbatim copy, so the risk is in `sendToPi()`, which is the old HTTP body code minus the HTTP. Flash to one gateway and watch `sudo journalctl -u ipond-serial -f` for `-> 201` before rolling out.
+- **Still on the main server:** the `unknown` field in the `/api/sync` response (so the Pi never marks rows the server could not place), and the `compare` route `$3` fix.
+
 ## [2026-09-14] — USB gateway follow-through: sync contract, listener hardening, compose consolidation
 
 Review of commit `f73924d` (USB-wired ESP32), fixing what the switch left inconsistent.

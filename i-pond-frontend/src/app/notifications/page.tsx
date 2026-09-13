@@ -2,6 +2,7 @@
 
 import { ErrorMessage, LoadingSpinner } from '@/components/Common';
 import MainLayout from '@/components/MainLayout';
+import { acknowledgeAlert, acknowledgeAllAlerts, refreshAlertViews } from '@/hooks/useAlerts';
 import { useState } from 'react';
 import useSWR from 'swr';
 
@@ -70,7 +71,7 @@ export default function NotificationsPage() {
 			refreshInterval: 30_000,
 		});
 
-	const { data: alerts, error: aErr, isLoading: aLoading } = useSWR<AlertRow[]>(
+	const { data: alerts, error: aErr, isLoading: aLoading, mutate: aMutate } = useSWR<AlertRow[]>(
 		'/api/alerts',
 		fetcher,
 		{ refreshInterval: 30_000 },
@@ -115,6 +116,39 @@ export default function NotificationsPage() {
 		if (pondFilter !== 'all' && String(m.pondId) !== pondFilter) return false;
 		return true;
 	});
+
+	const [ackBusy, setAckBusy] = useState<Set<string>>(new Set());
+	const [ackAllBusy, setAckAllBusy] = useState(false);
+	const openAlertCount = (alerts ?? []).filter((a) => !a.acknowledgedAt && !a.resolvedAt).length;
+
+	async function ackOne(id: string) {
+		setAckBusy((s) => new Set(s).add(id));
+		try {
+			await acknowledgeAlert(id);
+			await Promise.all([aMutate(), refreshAlertViews()]);
+		} catch (err) {
+			console.error('ack_failed', err);
+		} finally {
+			setAckBusy((s) => {
+				const n = new Set(s);
+				n.delete(id);
+				return n;
+			});
+		}
+	}
+
+	async function ackAll() {
+		if (!window.confirm(`Acknowledge all ${openAlertCount} open alert${openAlertCount === 1 ? '' : 's'}?`)) return;
+		setAckAllBusy(true);
+		try {
+			await acknowledgeAllAlerts();
+			await Promise.all([aMutate(), refreshAlertViews()]);
+		} catch (err) {
+			console.error('ack_all_failed', err);
+		} finally {
+			setAckAllBusy(false);
+		}
+	}
 
 	const filteredAlerts = (alerts ?? []).filter((a) => {
 		if (pondFilter !== 'all' && String(a.pondId) !== pondFilter) return false;
@@ -279,6 +313,21 @@ export default function NotificationsPage() {
 				) : aErr ? (
 					<ErrorMessage message="Failed to load alerts" />
 				) : (
+					<div className="space-y-3">
+					{openAlertCount > 0 && (
+						<div className="flex items-center justify-between gap-3 px-1">
+							<p className="text-[12px] text-slate-400">
+								{openAlertCount} open alert{openAlertCount === 1 ? '' : 's'} awaiting acknowledgement
+							</p>
+							<button
+								type="button"
+								onClick={ackAll}
+								disabled={ackAllBusy}
+								className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/40 text-rose-200 transition-colors disabled:opacity-50">
+								{ackAllBusy ? 'Acknowledging…' : 'Acknowledge all'}
+							</button>
+						</div>
+					)}
 					<div className="overflow-x-auto rounded-xl border border-[var(--border)]">
 						<table className="min-w-full text-sm">
 							<thead className="bg-white/5 text-[10px] uppercase tracking-wider text-slate-400">
@@ -291,13 +340,14 @@ export default function NotificationsPage() {
 									<th className="text-left px-4 py-2.5">Count</th>
 									<th className="text-left px-4 py-2.5">Acknowledged By</th>
 									<th className="text-left px-4 py-2.5">Resolved At</th>
+									<th className="text-left px-4 py-2.5">Actions</th>
 								</tr>
 							</thead>
 							<tbody>
 								{filteredAlerts.length === 0 ? (
 									<tr>
 										<td
-											colSpan={8}
+											colSpan={9}
 											className="text-center py-8 text-slate-500">
 											No alerts
 										</td>
@@ -337,11 +387,27 @@ export default function NotificationsPage() {
 													? new Date(a.resolvedAt).toLocaleString()
 													: '—'}
 											</td>
+											<td className="px-4 py-3 whitespace-nowrap">
+												{!a.acknowledgedAt && !a.resolvedAt ? (
+													<button
+														type="button"
+														onClick={() => ackOne(a.id)}
+														disabled={ackBusy.has(a.id) || ackAllBusy}
+														className="px-2.5 py-1 rounded text-[11px] font-semibold bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 border border-rose-400/30 disabled:opacity-50">
+														{ackBusy.has(a.id) ? '…' : 'Acknowledge'}
+													</button>
+												) : (
+													<span className="text-[11px] text-slate-500">
+														{a.resolvedAt ? 'Resolved' : 'Acknowledged'}
+													</span>
+												)}
+											</td>
 										</tr>
 									))
 								)}
 							</tbody>
 						</table>
+					</div>
 					</div>
 				)}
 			</div>

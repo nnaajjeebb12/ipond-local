@@ -9,6 +9,8 @@ type SyncStatusPayload = {
 	online: boolean;
 	serverReachable: boolean;
 	configured: boolean;
+	missing: string | null;
+	unsyncableCount: number;
 };
 
 type TriggerResult = {
@@ -54,12 +56,14 @@ export default function SyncStatus() {
 			const res = await fetch('/api/sync/trigger', { method: 'POST' });
 			const body = (await res.json()) as TriggerResult;
 			setToast({ text: body.message, ok: body.ok });
+			// Success fades; a failure stays until the next attempt so nobody
+			// misses "pond_mismatch" or "no internet" while looking away.
+			if (body.ok) setTimeout(() => setToast(null), 6000);
 			await mutate();
 		} catch {
 			setToast({ text: 'Sync request failed', ok: false });
 		} finally {
 			setBusy(false);
-			setTimeout(() => setToast(null), 6000);
 		}
 	}
 
@@ -69,13 +73,13 @@ export default function SyncStatus() {
 		);
 	}
 
-	const { online, serverReachable, pendingCount, lastSyncAt, configured } = data;
+	const { online, serverReachable, pendingCount, lastSyncAt, configured, missing, unsyncableCount } = data;
 
 	let dotCls = 'bg-slate-500';
 	let label: string;
 
 	if (!configured) {
-		label = 'Cloud sync not configured';
+		label = missing ? `Cloud sync not configured (${missing})` : 'Cloud sync not configured';
 	} else if (!online) {
 		dotCls = 'bg-rose-400 shadow-[0_0_8px_rgba(251,113,133,0.7)]';
 		label = 'Not synced — no internet';
@@ -103,6 +107,13 @@ export default function SyncStatus() {
 				<p className="text-[10px] text-slate-500">
 					{pendingCount.toLocaleString()} reading
 					{pendingCount === 1 ? '' : 's'} pending
+				</p>
+			)}
+			{unsyncableCount > 0 && (
+				<p
+					className="text-[10px] text-amber-300/90"
+					title="These readings belong to a pond with no PND-### code and cannot be sent.">
+					{unsyncableCount.toLocaleString()} cannot sync — pond has no code
 				</p>
 			)}
 
