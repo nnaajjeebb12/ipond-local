@@ -281,15 +281,19 @@ docker compose up -d
   `PND-###` code; set the gateway to post that number (`PND-011` → `pnd: 11`),
   and create the same code under this site's account on the main server (see
   below) — until then its readings wait on the Pi.
-- **Settings → Appliance** shows the license (client, days left, expiry) and
-  the cloud owner this Pi reports to — the customer's account on seeme-db.com
-  (its `id` is `SYNC_OWNER_ID`). The owner's name is typed in by the admin,
-  not fetched. Changing the owner needs the local admin login (`soletronix` /
-  `Soletronix@pi2026`); the ID is saved as typed, without checking it with the
-  main server. A wrong ID stops sync with "pond not found under this owner"
-  and nothing is lost — correct it and sync resumes. The change is stored in
-  the database and takes effect on the next sync; `SYNC_OWNER_ID` in `.env`
-  is only the initial value.
+- **Settings → Appliance → Cloud owner: sign in with the site's seeme-db.com
+  account.** The Pi performs the main server's own login (its existing
+  NextAuth routes), learns the account's id and name — that becomes the cloud
+  owner, no UUID to remember — and imports the account's ponds from
+  `/api/ponds`. Ponds in both places take the main server's record; ponds
+  only on the Pi are listed so someone creates them on the main server. Needs
+  internet; the password is used once and never stored. Viewer accounts are
+  refused (they cannot own ponds); admin accounts set the owner but import
+  nothing (admins see every site's ponds).
+  Offline fallback: local admin login (`soletronix` / `Soletronix@pi2026`) and
+  type the owner name + UUID; saved unverified — a wrong ID stops sync with
+  "pond not found under this owner", nothing is lost. Either way the value
+  lives in the database; `SYNC_OWNER_ID` in `.env` is only an optional seed.
 - **The main server is never changed.** It has no API for creating ponds or
   reading owners with a token, so a pond added on the Pi must also exist on the
   main server before its readings will sync — and it must carry the site's

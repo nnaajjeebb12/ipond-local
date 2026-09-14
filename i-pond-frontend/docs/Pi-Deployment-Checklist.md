@@ -86,8 +86,10 @@ Write these down now. You cannot finish without them.
       separate so a compromised pond sensor cannot rewrite historical data, and
       a leaked sync token cannot impersonate a sensor.
 - [ ] **Client / site name** — as it should appear on the licence.
-- [ ] **`SYNC_OWNER_ID`** — this site's owner UUID on seeme-db.com. Ask
-      Soletronix. Without it the Pi can store readings but cannot sync them.
+- [ ] **The site's seeme-db.com login** (email + password of the customer's
+      account). In section 12 you sign in with it once on the Pi; that tells
+      the Pi which account to sync to and imports the account's ponds. (An
+      owner UUID from Soletronix works as an offline fallback.)
 - [ ] **Number of ponds** at this site (1–10).
 - [ ] **Repository URL** for this project.
 - [ ] A **fixed IP address** for the Pi, or a DHCP reservation on the router
@@ -320,7 +322,7 @@ NEXT_PUBLIC_APP_TIMEZONE=Asia/Manila
 
 SYNC_TOKEN=<the 64-character token from 4.1 — NOT the same as API_TOKEN>
 MAIN_SERVER_URL=https://seeme-db.com
-SYNC_OWNER_ID=<owner UUID from Soletronix>
+SYNC_OWNER_ID=
 
 LICENSE_PATH=/home/pi/ipond-local/license.json
 ```
@@ -997,22 +999,37 @@ docker compose up -d                  # recreates the database container with th
    admin console alone is not enough). Until that is done the sidebar shows
    "PND-0NN not found under this owner" and only that pond's readings wait on
    the Pi — every other pond keeps syncing and nothing is lost.
+4. If the pond was created on the main server first, just sign in again on
+   Appliance → Cloud owner: it is imported here with the main server's name.
 
-### Checking the license and the cloud owner
+### Connecting the Pi to the site's cloud account (do this once)
 
-Sidebar → **Appliance**. The license card shows who it is licensed to, the
-days remaining and the expiry date — always, not only near expiry. The cloud
-owner card shows which main-server account this Pi's data goes to.
+Sidebar → **Appliance** → **Cloud owner** card. The Pi must have internet
+(the card says "Main server reachable").
 
-To set the owner's name, or change the owner (rare — only when Soletronix
-tells you to):
+- [ ] Enter the site's **seeme-db.com email and password** and click
+      **Sign in & import ponds**. The password is used once and not stored.
+- [ ] Read the summary. It shows the account the Pi will sync as, which ponds
+      were **updated from the main server** (the main server's name/location
+      win), which were **added** here, and which exist **only on this
+      appliance** — those must be created under the same account on the main
+      server (with `ponds.owner_id` set) before their readings can sync.
 
-- [ ] Click **Admin login** — username `soletronix`, password
-      `Soletronix@pi2026`.
-- [ ] Type the owner name and paste the owner ID **exactly** as Soletronix
-      gave them, then click **Save owner**. The ID is not checked online — if
-      it is wrong, the sidebar will say "pond not found under this owner" on
-      the next sync; correct it here and sync resumes. Nothing is lost.
+> **You should see:** the Owner line change from "not connected yet" to the
+> account's name, and the dashboard's Pond Network reflect the imported ponds.
+>
+> ⚠️ Sign in with the site's **owner** account. A *viewer* account is refused
+> (it cannot own ponds); an *admin* account sets the owner but imports no
+> ponds, because admins see every site's ponds.
+
+**No internet?** Click "Enter the owner manually (admin)": local admin login
+(`soletronix` / `Soletronix@pi2026`), then type the owner name and paste the
+owner UUID from Soletronix. It is not checked online — if it is wrong the
+sidebar says "pond not found under this owner" on the next sync; correct it
+and sync resumes. Nothing is lost.
+
+The license card on the same page shows who it is licensed to, the days
+remaining and the expiry date — always, not only near expiry.
 
 ### Backing up the database
 

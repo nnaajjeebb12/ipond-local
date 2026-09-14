@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { pool } from "@/lib/db";
 import { isAdmin } from "@/lib/adminSession";
-import { syncTarget } from "@/lib/sync";
+import { checkOnline, syncTarget } from "@/lib/sync";
 import {
   getSyncOwner,
   setSetting,
@@ -31,16 +31,32 @@ type OwnerStatus = {
   name: string | null;
   target: string;
   admin: boolean;
+  /** Whether "sign in with your cloud account" can work right now. */
+  online: boolean;
+  serverReachable: boolean;
 };
 
+// Short probe, cached: the page polls this and an offline Pi is normal.
+const PROBE_TIMEOUT_MS = 3000;
+const ONLINE_CACHE_MS = 30_000;
+let onlineCache: { at: number; value: Awaited<ReturnType<typeof checkOnline>> } | null = null;
+async function onlineCached() {
+  if (onlineCache && Date.now() - onlineCache.at < ONLINE_CACHE_MS) return onlineCache.value;
+  const value = await checkOnline(PROBE_TIMEOUT_MS);
+  onlineCache = { at: Date.now(), value };
+  return value;
+}
+
 async function status(req: NextRequest): Promise<OwnerStatus> {
-  const owner = await getSyncOwner(pool);
+  const [owner, net] = await Promise.all([getSyncOwner(pool), onlineCached()]);
   return {
     ownerId: owner.ownerId,
     source: owner.source,
     name: owner.name,
     target: syncTarget(),
     admin: isAdmin(req),
+    online: net.online,
+    serverReachable: net.serverReachable,
   };
 }
 

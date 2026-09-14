@@ -1,5 +1,26 @@
 # Changelog
 
+## [2026-09-14] — Cloud owner by signing in, not by UUID; pond import from the main server
+
+### Changed
+- **"Sign in with the site's seeme-db.com account"** on Settings → Appliance replaces remembering an owner UUID. `@/lib/cloudAccount` drives the main server's **existing** NextAuth credentials login (`/api/auth/csrf` → `/api/auth/callback/credentials` → `/api/auth/session`) — the same exchange its login page does — so nothing on the main server changes. The session's `id`/`name` become the cloud owner; `/api/ponds` (with the session) lists the account's ponds.
+- **Pond import with "main server wins".** `POST /api/settings/cloud-connect` reconciles by `pond_code`: on both → local row updated from the main server (name, location, capacity, area, company) and reported; main only → created here; local only → reported as needing creation on the main server. Ponds without a code are listed as unsyncable.
+- **Role handling:** viewer accounts are refused (cannot own ponds → sync could never match); admin accounts set the owner but skip the import, because `/api/ponds` returns every site's ponds for admins.
+- Requires the main server reachable (503 with the reason otherwise); the form is disabled offline with "Requires internet connection…". Password is used for one round trip, never stored, never logged (verified by grepping the server log).
+- Manual UUID entry stays as the offline fallback, now folded under "No internet? Enter the owner manually (admin)".
+- `GET /api/settings/owner` reports `online`/`serverReachable` again (3 s probe, 30 s cache) so the page can enable/disable the sign-in form.
+- `SYNC_OWNER_ID` in `.env` is now optional — an offline seed only.
+
+### Files Modified
+- src/lib/cloudAccount.ts *(new)*, src/app/api/settings/cloud-connect/route.ts *(new)*
+- src/app/api/settings/owner/route.ts, src/lib/settings.ts (`Queryable`), src/app/settings/appliance/page.tsx
+- .env.example, CLAUDE.md, README.md, docs/Pi-Deployment-Checklist.md
+
+### Notes
+- **Tested against the real main-server code:** the clone (`cloned main/`, b0c3b75) was run locally with its own database (owner/viewer/admin accounts with bcrypt passwords, ponds with `owner_id`, a second site's `PND-001` with NULL owner). Wrong password and unknown email → 401; viewer → 403; admin → owner set, no import, note; owner → id/name saved, `PND-001`/`PND-002` updated from the main server (Pond 1/Site → Main Pond A/North field/Bayside), `PND-030` created, `PND-003..010` reported local-only, the other site's `PND-001` **not** imported. A sync run afterwards landed readings for the three account ponds under the right owner and left `PND-003` waiting with its message.
+- Success is judged by `/api/auth/session` returning a user, not by where the callback redirected — Auth.js redirect targets vary by version; the session route does not.
+- `cloned main/` now has `node_modules` installed for this test; it is ignored by both repos.
+
 ## [2026-09-14] — Worker matched to the real sync receiver; one missing pond no longer blocks the site
 
 ### Changed

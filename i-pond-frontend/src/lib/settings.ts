@@ -6,13 +6,16 @@
  */
 import type { Pool } from "pg";
 
+/** A Pool or a checked-out PoolClient — anything with pg's query(). */
+export type Queryable = Pick<Pool, "query">;
+
 export const SETTING_SYNC_OWNER_ID = "sync_owner_id";
 /** Display name typed by the local admin. Never fetched — the main server exposes no owner lookup. */
 export const SETTING_SYNC_OWNER_NAME = "sync_owner_name";
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export async function getSetting(pool: Pool, key: string): Promise<string | null> {
+export async function getSetting(pool: Queryable, key: string): Promise<string | null> {
 	const { rows } = await pool.query<{ value: string }>(
 		`SELECT value FROM app_settings WHERE key = $1`,
 		[key]
@@ -20,7 +23,7 @@ export async function getSetting(pool: Pool, key: string): Promise<string | null
 	return rows[0]?.value ?? null;
 }
 
-export async function setSetting(pool: Pool, key: string, value: string): Promise<void> {
+export async function setSetting(pool: Queryable, key: string, value: string): Promise<void> {
 	await pool.query(
 		`INSERT INTO app_settings (key, value, updated_at)
 		 VALUES ($1, $2, NOW())
@@ -42,7 +45,7 @@ export type SyncOwner = {
  * DB wins over .env so a change made from the UI takes effect immediately for
  * the worker, the status endpoint and the page — no restart, no file writes.
  */
-export async function getSyncOwner(pool: Pool): Promise<SyncOwner> {
+export async function getSyncOwner(pool: Queryable): Promise<SyncOwner> {
 	const [stored, name] = await Promise.all([
 		getSetting(pool, SETTING_SYNC_OWNER_ID),
 		getSetting(pool, SETTING_SYNC_OWNER_NAME),

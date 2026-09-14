@@ -3,7 +3,7 @@
 import { LoadingSpinner } from '@/components/Common';
 import MainLayout from '@/components/MainLayout';
 import { useState } from 'react';
-import useSWR from 'swr';
+import useSWR, { mutate as globalMutate } from 'swr';
 
 type LicenseStatus = {
 	valid: boolean;
@@ -19,6 +19,21 @@ type OwnerStatus = {
 	name: string | null;
 	target: string;
 	admin: boolean;
+	online: boolean;
+	serverReachable: boolean;
+};
+
+type PondRef = { pond_code: string; name: string };
+type ConnectSummary = {
+	owner: { id: string; name: string; email: string; role: string };
+	ponds: {
+		cloudCount: number;
+		updated: PondRef[];
+		created: PondRef[];
+		localOnly: PondRef[];
+		uncoded: { name: string }[];
+	};
+	note: string | null;
 };
 
 async function jsonFetcher<T>(url: string): Promise<T> {
@@ -190,10 +205,122 @@ function AdminLogin({ onDone }: { onDone: () => void }) {
 	);
 }
 
-function OwnerCard() {
-	const { data, error, mutate } = useSWR<OwnerStatus>('/api/settings/owner', jsonFetcher, {
-		revalidateOnFocus: false,
-	});
+function CloudConnect({ status, onDone }: { status: OwnerStatus; onDone: () => void }) {
+	const [email, setEmail] = useState('');
+	const [password, setPassword] = useState('');
+	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+	const [summary, setSummary] = useState<ConnectSummary | null>(null);
+
+	const blocked = !status.serverReachable
+		? status.online
+			? 'Main server unreachable right now — try again later.'
+			: 'Requires internet connection to sign in to the main server.'
+		: null;
+
+	async function submit(e: React.FormEvent) {
+		e.preventDefault();
+		setBusy(true);
+		setError(null);
+		setSummary(null);
+		try {
+			const res = await fetch('/api/settings/cloud-connect', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ email: email.trim(), password }),
+			});
+			const body = (await res.json().catch(() => ({}))) as Partial<ConnectSummary> & { message?: string; error?: string };
+			if (!res.ok) {
+				setError(body.message ?? `Could not connect (server said ${res.status}).`);
+				return;
+			}
+			setPassword('');
+			setSummary(body as ConnectSummary);
+			onDone();
+		} catch {
+			setError('Could not reach the appliance server.');
+		} finally {
+			setBusy(false);
+		}
+	}
+
+	const list = (items: PondRef[]) => items.map((p) => `${p.pond_code} (${p.name})`).join(', ');
+
+	return (
+		<form onSubmit={submit} className="space-y-3">
+			<div>
+				<p className="text-sm text-slate-200 font-semibold">Sign in with the site&apos;s seeme-db.com account</p>
+				<p className="text-[11px] text-slate-500 mt-0.5">
+					The account becomes this appliance&apos;s cloud owner and its ponds are imported here. Where a pond
+					exists in both places, the main server&apos;s record is kept. The password is used once and not stored.
+				</p>
+			</div>
+			{blocked && (
+				<p className="text-[11px] text-amber-300/90 rounded-lg bg-amber-500/10 border border-amber-400/20 px-3 py-2">
+					{blocked}
+				</p>
+			)}
+			<div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+				<input
+					value={email}
+					onChange={(e) => setEmail(e.target.value)}
+					placeholder="Email on seeme-db.com"
+					type="email"
+					autoComplete="off"
+					disabled={!!blocked}
+					required
+					className={`${inputCls} disabled:opacity-50`}
+				/>
+				<input
+					value={password}
+					onChange={(e) => setPassword(e.target.value)}
+					placeholder="Password"
+					type="password"
+					autoComplete="off"
+					disabled={!!blocked}
+					required
+					className={`${inputCls} disabled:opacity-50`}
+				/>
+			</div>
+			{error && <p className="text-[11px] text-rose-300" role="alert">{error}</p>}
+			{summary && (
+				<div className="rounded-lg bg-emerald-500/10 border border-emerald-400/20 px-3 py-2 text-[11px] text-slate-200 space-y-1">
+					<p className="text-emerald-300 font-semibold">
+						Connected as {summary.owner.name} ({summary.owner.email})
+					</p>
+					{summary.note && <p className="text-amber-300/90">{summary.note}</p>}
+					{summary.ponds.updated.length > 0 && (
+						<p>Updated from the main server: {list(summary.ponds.updated)}</p>
+					)}
+					{summary.ponds.created.length > 0 && (
+						<p>Added to this appliance: {list(summary.ponds.created)}</p>
+					)}
+					{summary.ponds.localOnly.length > 0 && (
+						<p className="text-amber-300/90">
+							Only on this appliance — create these under {summary.owner.name} on the main server or their readings will wait here: {list(summary.ponds.localOnly)}
+						</p>
+					)}
+					{summary.ponds.uncoded.length > 0 && (
+						<p className="text-slate-400">
+							On the main server without a pond code (cannot sync): {summary.ponds.uncoded.map((p) => p.name).join(', ')}
+						</p>
+					)}
+					{summary.owner.role !== 'admin' && summary.ponds.cloudCount === 0 && (
+						<p className="text-amber-300/90">The account has no ponds on the main server yet.</p>
+					)}
+				</div>
+			)}
+			<button
+				type="submit"
+				disabled={busy || !!blocked || !email.trim() || !password}
+				className="px-4 py-2 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/40 text-cyan-200 text-sm font-semibold disabled:opacity-50 transition-colors">
+				{busy ? 'Signing in…' : 'Sign in & import ponds'}
+			</button>
+		</form>
+	);
+}
+
+function ManualOwner({ status, onDone }: { status: OwnerStatus; onDone: () => void }) {
 	const [newId, setNewId] = useState('');
 	const [newName, setNewName] = useState('');
 	const [busy, setBusy] = useState(false);
@@ -222,13 +349,13 @@ function OwnerCard() {
 									: `Could not save (server said ${res.status}).`,
 					ok: false,
 				});
-				if (body.error === 'admin_required') await mutate();
+				if (body.error === 'admin_required') onDone();
 				return;
 			}
 			setNewId('');
 			setNewName('');
 			setMsg({ text: `Saved. Readings now sync as ${body.name}.`, ok: true });
-			await mutate();
+			onDone();
 		} catch {
 			setMsg({ text: 'Could not reach the server.', ok: false });
 		} finally {
@@ -238,24 +365,106 @@ function OwnerCard() {
 
 	async function logout() {
 		await fetch('/api/admin/logout', { method: 'POST' }).catch(() => {});
-		await mutate();
+		onDone();
 	}
+
+	if (!status.admin) return <AdminLogin onDone={onDone} />;
+
+	return (
+		<form onSubmit={save} className="space-y-3">
+			<div className="flex items-center justify-between flex-wrap gap-2">
+				<p className="text-sm text-slate-300">
+					Signed in as <span className="text-violet-300 font-semibold">local admin</span>
+				</p>
+				<button type="button" onClick={logout} className="text-[11px] text-slate-400 hover:text-slate-200 underline">
+					Log out
+				</button>
+			</div>
+			<p className="text-[11px] text-amber-300/90 rounded-lg bg-amber-500/10 border border-amber-400/20 px-3 py-2">
+				The ID cannot be checked against the main server — copy it exactly as Soletronix gave it. If it is
+				wrong, sync stops with &ldquo;pond not found under this owner&rdquo; and nothing is lost; correct it
+				here and sync resumes.
+			</p>
+			<div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+				<div>
+					<label className="block text-[11px] uppercase tracking-wider font-semibold text-slate-400 mb-1">
+						Owner name
+					</label>
+					<input
+						value={newName}
+						onChange={(e) => setNewName(e.target.value)}
+						placeholder={status.name ?? 'e.g. Bayside Aquafarm'}
+						maxLength={120}
+						className={inputCls}
+					/>
+				</div>
+				<div>
+					<label className="block text-[11px] uppercase tracking-wider font-semibold text-slate-400 mb-1">
+						Owner ID
+					</label>
+					<input
+						value={newId}
+						onChange={(e) => setNewId(e.target.value)}
+						placeholder={status.ownerId ?? '00000000-0000-0000-0000-000000000000'}
+						className={`${inputCls} font-mono`}
+					/>
+				</div>
+			</div>
+			{msg && (
+				<p className={`text-[11px] ${msg.ok ? 'text-emerald-300' : 'text-rose-300'}`} role="alert">
+					{msg.text}
+				</p>
+			)}
+			<button
+				type="submit"
+				disabled={busy || !newId.trim() || !newName.trim()}
+				className="px-4 py-2 rounded-lg bg-violet-500/20 hover:bg-violet-500/30 border border-violet-400/40 text-violet-200 text-sm font-semibold disabled:opacity-50 transition-colors">
+				{busy ? 'Saving…' : 'Save owner'}
+			</button>
+		</form>
+	);
+}
+
+function OwnerCard() {
+	const { data, error, mutate } = useSWR<OwnerStatus>('/api/settings/owner', jsonFetcher, {
+		refreshInterval: 60_000,
+		revalidateOnFocus: false,
+	});
+	const [showManual, setShowManual] = useState(false);
 
 	if (error) return <div className={cardCls}><p className="text-sm text-rose-300">Could not read owner status.</p></div>;
 	if (!data) return <div className={cardCls}><LoadingSpinner /></div>;
 
+	async function refresh() {
+		await mutate();
+		await globalMutate('/api/ponds');
+		await globalMutate('/api/ponds/status');
+	}
+
 	return (
 		<div className={cardCls}>
-			<div className="flex items-center gap-3">
-				<div className="w-10 h-10 rounded-lg bg-violet-500/10 border border-violet-400/20 flex items-center justify-center text-xl">
-					☁️
+			<div className="flex items-center justify-between flex-wrap gap-3">
+				<div className="flex items-center gap-3">
+					<div className="w-10 h-10 rounded-lg bg-violet-500/10 border border-violet-400/20 flex items-center justify-center text-xl">
+						☁️
+					</div>
+					<div>
+						<h3 className="text-base font-semibold text-white">Cloud owner</h3>
+						<p className="text-[11px] text-slate-500">
+							Every reading this appliance syncs is attributed to this account on{' '}
+							<span className="font-mono">{data.target.replace(/^https?:\/\//, '')}</span>.
+						</p>
+					</div>
 				</div>
-				<div>
-					<h3 className="text-base font-semibold text-white">Cloud owner</h3>
-					<p className="text-[11px] text-slate-500">
-						Every reading this appliance syncs is attributed to this account on{' '}
-						<span className="font-mono">{data.target.replace(/^https?:\/\//, '')}</span>.
-					</p>
+				<div className="flex items-center gap-2 text-[11px]">
+					<span
+						className={`inline-block w-2 h-2 rounded-full ${
+							data.serverReachable ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.7)]' : data.online ? 'bg-amber-400' : 'bg-rose-400'
+						}`}
+					/>
+					<span className="text-slate-300">
+						{data.serverReachable ? 'Main server reachable' : data.online ? 'Main server unreachable' : 'No internet'}
+					</span>
 				</div>
 			</div>
 
@@ -263,9 +472,8 @@ function OwnerCard() {
 				<div>
 					<p className={labelCls}>Owner</p>
 					<p className="text-sm text-slate-100 mt-1">
-						{data.name ?? <span className="text-slate-500 italic">name not entered yet</span>}
+						{data.name ?? <span className="text-slate-500 italic">not connected yet</span>}
 					</p>
-					<p className="text-[11px] mt-1 text-slate-500">As entered on this appliance</p>
 				</div>
 				<div>
 					<p className={labelCls}>Owner ID</p>
@@ -273,77 +481,26 @@ function OwnerCard() {
 						{data.ownerId ?? <span className="text-rose-300">not set — sync is disabled</span>}
 					</p>
 					<p className="text-[11px] mt-1 text-slate-500">
-						{data.source === 'db'
-							? 'Set from this page'
-							: data.source === 'env'
-								? 'From SYNC_OWNER_ID in .env'
-								: 'Set SYNC_OWNER_ID in .env, or enter it below'}
+						{data.source === 'db' ? 'Set on this page' : data.source === 'env' ? 'From SYNC_OWNER_ID in .env' : 'Sign in below to set it'}
 					</p>
 				</div>
 			</div>
 
-			<div className="border-t border-[var(--border)] pt-4">
-				{!data.admin ? (
-					<AdminLogin onDone={() => mutate()} />
-				) : (
-					<form onSubmit={save} className="space-y-3">
-						<div className="flex items-center justify-between flex-wrap gap-2">
-							<p className="text-sm text-slate-300">
-								Signed in as <span className="text-violet-300 font-semibold">local admin</span>
-							</p>
-							<button
-								type="button"
-								onClick={logout}
-								className="text-[11px] text-slate-400 hover:text-slate-200 underline">
-								Log out
-							</button>
+			<div className="border-t border-[var(--border)] pt-4 space-y-4">
+				<CloudConnect status={data} onDone={refresh} />
+				<div>
+					<button
+						type="button"
+						onClick={() => setShowManual((v) => !v)}
+						className="text-[11px] text-slate-400 hover:text-slate-200 underline">
+						{showManual ? 'Hide manual entry' : 'No internet? Enter the owner manually (admin)'}
+					</button>
+					{showManual && (
+						<div className="mt-3 rounded-lg bg-white/3 border border-white/10 p-4">
+							<ManualOwner status={data} onDone={refresh} />
 						</div>
-						<p className="text-[11px] text-amber-300/90 rounded-lg bg-amber-500/10 border border-amber-400/20 px-3 py-2">
-							The ID cannot be checked against the main server — copy it exactly as Soletronix gave it.
-							If it is wrong, sync stops with &ldquo;pond not found under this owner&rdquo; and nothing is lost;
-							correct it here and sync resumes.
-						</p>
-						<div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-							<div>
-								<label className="block text-[11px] uppercase tracking-wider font-semibold text-slate-400 mb-1">
-									Owner name
-								</label>
-								<input
-									value={newName}
-									onChange={(e) => setNewName(e.target.value)}
-									placeholder={data.name ?? 'e.g. Bayside Aquafarm'}
-									maxLength={120}
-									className={inputCls}
-								/>
-							</div>
-							<div>
-								<label className="block text-[11px] uppercase tracking-wider font-semibold text-slate-400 mb-1">
-									Owner ID
-								</label>
-								<input
-									value={newId}
-									onChange={(e) => setNewId(e.target.value)}
-									placeholder={data.ownerId ?? '00000000-0000-0000-0000-000000000000'}
-									className={`${inputCls} font-mono`}
-								/>
-							</div>
-						</div>
-						<p className="text-[11px] text-slate-500">
-							Readings already synced stay under the previous owner; pending and future readings go to the new one.
-						</p>
-						{msg && (
-							<p className={`text-[11px] ${msg.ok ? 'text-emerald-300' : 'text-rose-300'}`} role="alert">
-								{msg.text}
-							</p>
-						)}
-						<button
-							type="submit"
-							disabled={busy || !newId.trim() || !newName.trim()}
-							className="px-4 py-2 rounded-lg bg-violet-500/20 hover:bg-violet-500/30 border border-violet-400/40 text-violet-200 text-sm font-semibold disabled:opacity-50 transition-colors">
-							{busy ? 'Saving…' : 'Save owner'}
-						</button>
-					</form>
-				)}
+					)}
+				</div>
 			</div>
 		</div>
 	);
