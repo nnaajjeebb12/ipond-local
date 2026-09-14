@@ -962,8 +962,17 @@ cd /home/pi/ipond-local
 docker compose -p ipond-local down
 cd i-pond-frontend
 grep POSTGRES_PASSWORD .env      # must be the password the DB was created with
+grep DB_DATA_PATH .env           # MUST print DB_DATA_PATH=/mnt/ipond-data/timescaledb
 docker compose up -d
+docker inspect ipond-timescaledb --format '{{range .Mounts}}{{.Source}}{{"
+"}}{{end}}'
 ```
+
+⚠️ If `DB_DATA_PATH` is missing from `.env` (older installs), **add it before
+`docker compose up`**. Without it the container defaults to a `data/` folder on
+the SD card and Postgres silently initialises a brand-new empty database there —
+the app comes up with no ponds and no readings, and your data sits unused on
+the USB drive. The `docker inspect` line must show `/mnt/ipond-data/timescaledb`.
 
 Do this once, then use the normal update steps below.
 
