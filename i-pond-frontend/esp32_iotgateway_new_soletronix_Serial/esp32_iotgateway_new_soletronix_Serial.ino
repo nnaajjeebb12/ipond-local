@@ -23,7 +23,10 @@
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 GravityRtc rtc;
-DynamicJsonDocument jsonDoc(200);
+// ArduinoJson 7: JsonDocument grows as needed. The old firmware's
+// DynamicJsonDocument(200) is deprecated and slated for removal; for the
+// sensor board's ~80-byte payload the two behave identically.
+JsonDocument jsonDoc;
 
 // ------------------------------------------ GLOBAL VARIABLES ---------------
 

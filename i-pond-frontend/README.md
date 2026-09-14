@@ -15,7 +15,7 @@ This repository is the **local appliance build**: a self-hosted Raspberry Pi tha
 - **Database** — PostgreSQL 16 + TimescaleDB (hypertable on `sensor_readings`), `pg` (node-postgres)
 - **Export** — jsPDF + jspdf-autotable (PDF), native CSV
 - **HTTP / Time** — axios, moment
-- **Hardware** — ESP32 gateway (`esp32_iotgateway_new_soletronix_Serial.ino`), **wired by USB** — no Wi-Fi. `scripts/serial-listener.js` forwards its serial output into the ingest route
+- **Hardware** — ESP32 gateway (`esp32_iotgateway_new_soletronix_Serial/esp32_iotgateway_new_soletronix_Serial.ino`), **wired by USB** — no Wi-Fi. `scripts/serial-listener.js` forwards its serial output into the ingest route
 - **Deployment** — Next.js `output: "standalone"` behind nginx, systemd-managed
 
 ## Quick Start
