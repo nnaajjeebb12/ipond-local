@@ -7,6 +7,7 @@
 import type { Pool } from "pg";
 
 export const SETTING_SYNC_OWNER_ID = "sync_owner_id";
+/** Display name typed by the local admin. Never fetched — the main server exposes no owner lookup. */
 export const SETTING_SYNC_OWNER_NAME = "sync_owner_name";
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -32,7 +33,7 @@ export type SyncOwner = {
 	ownerId: string | null;
 	/** Where the id came from: a UI change saved to the DB, or the .env seed. */
 	source: "db" | "env" | "none";
-	/** Last name the main server confirmed for this owner, if any. */
+	/** Display name entered on the appliance, if any. */
 	name: string | null;
 };
 

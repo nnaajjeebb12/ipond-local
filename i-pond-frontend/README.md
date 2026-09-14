@@ -278,22 +278,22 @@ docker compose up -d
 ### Adding ponds and the cloud owner
 
 - **Add a pond** from the dashboard ("+ Add Pond"). It gets the next free
-  `PND-###` code; set the gateway to post that number (`PND-011` → `pnd: 11`).
-  The sync worker creates the pond on the main server before its first
-  readings ship — provided the main server has the `/api/sync/ponds` endpoint
-  (see below).
+  `PND-###` code; set the gateway to post that number (`PND-011` → `pnd: 11`),
+  and create the same code under this site's account on the main server (see
+  below) — until then its readings wait on the Pi.
 - **Settings → Appliance** shows the license (client, days left, expiry) and
-  the cloud owner this Pi reports to. Changing the owner needs the local admin
-  login (`soletronix` / `Soletronix@pi2026`), an internet connection, and the
-  new owner must exist on the main server. The change is stored in the
-  database and takes effect on the next sync; `SYNC_OWNER_ID` in `.env` is
-  only the initial value.
-- **Main server (seeme-db.com):** two optional, self-contained routes make the
-  above seamless — copy `src/app/api/sync/owner/route.ts` and
-  `src/app/api/sync/ponds/route.ts` from this repo into the same paths there.
-  Nothing else on the main server changes. Without them the appliance still
-  works: ponds must then be created on the main server by hand, and the owner
-  panel shows the id without a name.
+  the cloud owner this Pi reports to — the customer's account on seeme-db.com
+  (its `id` is `SYNC_OWNER_ID`). The owner's name is typed in by the admin,
+  not fetched. Changing the owner needs the local admin login (`soletronix` /
+  `Soletronix@pi2026`); the ID is saved as typed, without checking it with the
+  main server. A wrong ID stops sync with "pond not found under this owner"
+  and nothing is lost — correct it and sync resumes. The change is stored in
+  the database and takes effect on the next sync; `SYNC_OWNER_ID` in `.env`
+  is only the initial value.
+- **The main server is never changed.** It has no API for creating ponds or
+  reading owners with a token, so a pond added on the Pi must also be created
+  under the same account in the main server's admin console (`/admin/ponds`)
+  before its readings will sync.
 
 ### Database performance notes
 

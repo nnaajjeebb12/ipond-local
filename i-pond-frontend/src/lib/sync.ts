@@ -152,108 +152,6 @@ export async function checkOnline(timeoutMs: number = PROBE_TIMEOUT_MS): Promise
 	return { online: false, serverReachable: false, detail: "no internet connection" };
 }
 
-// ---------------------------------------------------------------------------
-// Optional main-server endpoints. Both are additive files on the main server
-// (reference copies live in src/app/api/sync/owner and /ponds). A server that
-// has not deployed them answers 404, which is reported as `supported: false`
-// and never treated as an error — the appliance keeps working exactly as it
-// did before they existed.
-// ---------------------------------------------------------------------------
-
-export type OwnerLookup =
-	| { supported: true; found: true; name: string; email: string | null }
-	| { supported: true; found: false }
-	| { supported: false; detail: string };
-
-/** Ask the main server who an owner id is. */
-export async function lookupOwner(ownerId: string, timeoutMs = POST_TIMEOUT_MS): Promise<OwnerLookup> {
-	const token = process.env.SYNC_TOKEN;
-	if (!token) return { supported: false, detail: "SYNC_TOKEN is not set" };
-	let res: Response;
-	try {
-		res = await fetchWithTimeout(
-			`${syncTarget()}/api/sync/owner?id=${encodeURIComponent(ownerId)}`,
-			{ method: "GET", cache: "no-store", headers: { Authorization: `Bearer ${token}` } },
-			timeoutMs
-		);
-	} catch (err) {
-		return { supported: false, detail: `main server unreachable: ${String(err)}` };
-	}
-	if (res.status === 404) {
-		// Either the endpoint is missing or the owner is. The reference route
-		// answers 404 with { error: "owner_not_found" }; a bare Next 404 has
-		// no such body.
-		const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
-		if (body && body.error === "owner_not_found") return { supported: true, found: false };
-		return { supported: false, detail: "main server has no /api/sync/owner endpoint" };
-	}
-	if (!res.ok) {
-		return { supported: false, detail: `main server returned ${res.status}` };
-	}
-	const body = (await res.json().catch(() => null)) as { name?: unknown; email?: unknown } | null;
-	if (!body || typeof body.name !== "string") {
-		return { supported: false, detail: "unexpected response from main server" };
-	}
-	return { supported: true, found: true, name: body.name, email: typeof body.email === "string" ? body.email : null };
-}
-
-export type PondRegistration =
-	| { supported: true; created: string[]; existing: string[] }
-	| { supported: false; detail: string };
-
-/**
- * Make sure (owner_id, pond_code) exists on the main server for each pond,
- * creating the missing ones. Idempotent.
- */
-export async function registerPonds(
-	ownerId: string,
-	ponds: { pond_code: string; name: string; location?: string | null }[],
-	timeoutMs = POST_TIMEOUT_MS
-): Promise<PondRegistration> {
-	const token = process.env.SYNC_TOKEN;
-	if (!token) return { supported: false, detail: "SYNC_TOKEN is not set" };
-	if (ponds.length === 0) return { supported: true, created: [], existing: [] };
-	let res: Response;
-	try {
-		res = await fetchWithTimeout(
-			`${syncTarget()}/api/sync/ponds`,
-			{
-				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-				body: JSON.stringify({ owner_id: ownerId, ponds }),
-			},
-			timeoutMs
-		);
-	} catch (err) {
-		return { supported: false, detail: `main server unreachable: ${String(err)}` };
-	}
-	if (res.status === 404) {
-		return { supported: false, detail: "main server has no /api/sync/ponds endpoint" };
-	}
-	if (!res.ok) {
-		const text = await res.text().catch(() => "");
-		return { supported: false, detail: `main server returned ${res.status} ${text.slice(0, 120)}` };
-	}
-	const body = (await res.json().catch(() => null)) as { created?: unknown; existing?: unknown } | null;
-	const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : []);
-	return { supported: true, created: list(body?.created), existing: list(body?.existing) };
-}
-
-/** Distinct ponds that have readings waiting to ship. */
-async function pondsWithPending(pool: Pool): Promise<{ pond_code: string; name: string; location: string | null }[]> {
-	const { rows } = await pool.query<{ pond_code: string; name: string; location: string | null }>(
-		`SELECT DISTINCT p.pond_code, p.name, p.location
-		   FROM ponds p
-		  WHERE p.pond_code IS NOT NULL
-		    AND EXISTS (
-		      SELECT 1 FROM sensor_readings sr
-		       WHERE sr.pond_id = p.id AND sr.synced_at IS NULL
-		    )
-		  ORDER BY p.pond_code`
-	);
-	return rows;
-}
-
 export async function countPending(pool: Pool): Promise<number> {
 	const { rows } = await pool.query<{ n: string }>(
 		`SELECT COUNT(*)::text AS n FROM sensor_readings WHERE synced_at IS NULL`
@@ -403,22 +301,6 @@ export async function runSync(
 		// diagnostic only
 	}
 
-	// Ponds added on this appliance do not exist on the main server until
-	// something creates them there. Register every pond with pending readings
-	// first, so the batch that follows cannot come back `unknown`. A server
-	// without the endpoint is not an error — the old pond_mismatch path below
-	// still catches it, and the log says what to deploy.
-	try {
-		const ponds = await pondsWithPending(pool);
-		const reg = await registerPonds(ownerId, ponds);
-		if (!reg.supported) {
-			log(`pond registration skipped: ${reg.detail} — ponds must exist under the owner on the main server`);
-		} else if (reg.created.length > 0) {
-			log(`created on main server: ${reg.created.join(", ")}`);
-		}
-	} catch (err) {
-		log(`pond registration failed: ${String(err)}`);
-	}
 
 	let synced = 0;
 	let batches = 0;
@@ -507,9 +389,10 @@ export async function runSync(
 		if (serverUnknown !== null && serverUnknown > 0) {
 			log(
 				`batch ${batches}: server did not recognise ${serverUnknown}/${batch.length} rows — ` +
-					`check SYNC_OWNER_ID and that ponds PND-001.. exist under that owner on the main server. Nothing marked.`
+					`the pond codes in this batch (${[...new Set(batch.map((r) => r.pond_code))].join(", ")}) must exist under owner ${ownerId} ` +
+					`on the main server (create them in its admin console), or the owner on Settings > Appliance is wrong. Nothing marked.`
 			);
-			return result("pond_mismatch", `Main server rejected ${serverUnknown} readings: unknown pond for this owner`, {
+			return result("pond_mismatch", `Main server rejected ${serverUnknown} readings: pond not found under this owner — create it on the main server`, {
 				synced,
 				batches: batches - 1,
 				skipped,

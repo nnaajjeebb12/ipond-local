@@ -117,8 +117,9 @@ Local appliance, cron every 5min
 - The worker always **exits 0** — "no internet" is a normal outcome. Never call `process.exit()` straight after a failed fetch: it lands on a closing handle and aborts with a libuv assertion (exit 127) even on success.
 - `fetchBatch` INNER JOINs `ponds` and requires `pond_code IS NOT NULL`. A reading whose pond has no code is **left pending and counted** (`countUnsyncable`, shown in the sidebar as "cannot sync — pond has no code") instead of being sent — one such row would 400 the whole batch at the receiver and, because batches are time-ordered, wedge sync on that batch forever.
 - **On the wire a pond is `(owner_id, pond_code)`, never the local `pond_id`.** The multi-tenant cloud needs the owner to tell sites apart. The worker refuses to run without one.
-- **The owner comes from `app_settings.sync_owner_id` first, `SYNC_OWNER_ID` in `.env` second** (`getSyncOwner` in `@/lib/settings`). `.env` is the seed; the Appliance page can change it at runtime (admin-gated, verified with the main server) and the change applies to the next sync with no restart. `syncConfig(pool)` is async for this reason.
-- **Before every run the worker registers ponds on the main server** (`registerPonds` → `POST {main}/api/sync/ponds`) so a pond added on the Pi exists under the owner before its readings arrive. A main server that has not deployed that endpoint answers a bare 404 → `supported: false` → logged, and the run continues exactly as before (readings for unknown ponds come back `unknown` → `pond_mismatch`). Same pattern for `lookupOwner` (`GET {main}/api/sync/owner?id=`). **Both are optional, additive files on the main server** — reference copies in `src/app/api/sync/owner` and `/ponds`. Never make the worker depend on them.
+- **The owner comes from `app_settings.sync_owner_id` first, `SYNC_OWNER_ID` in `.env` second** (`getSyncOwner` in `@/lib/settings`). `.env` is the seed; the Appliance page can change it at runtime (admin-gated) and the change applies to the next sync with no restart. `syncConfig(pool)` is async for this reason.
+- **The main server is not to be changed — ever — and exposes nothing about owners or pond creation to a token client.** So: the owner *name* on the Appliance page is typed by the admin, not fetched; an owner change is saved **unverified**; and a pond added on the Pi must be created by hand under the same owner in the main server's admin console (`/admin/ponds`). A wrong owner or a missing pond is not data loss — the worker returns `pond_mismatch`, marks nothing, and the log names the pond codes and owner involved.
+- **Owners = users on the main server.** One table, `owners`: `id` (this is `SYNC_OWNER_ID`), `name`, `email`, `password_hash`, `role`, `expires_at`. The appliance's owner is simply the customer's login account there.
 - The receiver answers `{ ok, inserted, duplicate, unknown, skipped, received }`. `duplicate` = already there (safe to mark). `unknown` = no pond for that `(owner, code)` on the server (**NOT** there). **The worker marks nothing and returns `pond_mismatch` when `unknown > 0`** — marking would silently lose those readings forever. A receiver that omits `unknown` gets the old behaviour plus a loud log line.
 - The production receiver on seeme-db.com lives in its own repo; `src/app/api/sync/route.ts` here is the reference implementation of the same contract so the two sides cannot drift apart again.
 
@@ -186,7 +187,7 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - `/admin/logs` — ingestion logs (kept for local debugging; pond filter reads `/api/ponds`)
 - `/notifications` — maintenance + alerts
 - `/settings/thresholds` — optimal range config
-- `/settings/appliance` — license status (client, days left, expiry — always shown, unlike the ≤30-day banner) and the cloud owner panel (id, confirmed name, reachability; change gated by the local admin login)
+- `/settings/appliance` — license status (client, days left, expiry — always shown, unlike the ≤30-day banner) and the cloud owner panel (id + admin-typed name; change gated by the local admin login, saved without remote verification)
 
 ## API Routes
 
@@ -203,8 +204,8 @@ All pages are open — no session, no role gate. The license gate wraps them all
 ### Dashboard data (open)
 - `GET /api/ponds` — all ponds
 - `POST /api/ponds` — create. `{ name (required), pond_code?, location?, capacity?, area? }`. Blank `pond_code` → next free `PND-###` after the highest in use (table lock, so two clicks cannot draw the same code). 409 `pond_code_taken`. Returns the GET shape, 201.
-- `GET /api/settings/owner` — `{ ownerId, source: db|env|none, name, target, online, serverReachable, live, admin }`. Does a live name lookup when the server is reachable and caches it in `app_settings.sync_owner_name`.
-- `PUT /api/settings/owner` — **admin cookie required** (401 `admin_required`). Verifies with the main server first: 503 `offline`/`server_unreachable`, 409 `lookup_unsupported` (endpoint not deployed there), 404 `owner_not_found`; then saves id + name to `app_settings`.
+- `GET /api/settings/owner` — `{ ownerId, source: db|env|none, name, target, admin }`. Entirely local; no main-server call.
+- `PUT /api/settings/owner` — **admin cookie required** (401 `admin_required`). `{ ownerId (UUID), name (required) }` → saved to `app_settings` **without** remote verification (there is nothing on the main server to verify against). 400 `invalid_owner_id` / `name_required`.
 - `POST /api/admin/login` / `POST /api/admin/logout` / `GET /api/admin/session` — local appliance admin gate (`@/lib/adminSession`): fixed credential `soletronix` / `Soletronix@pi2026`, HMAC cookie `ipond_admin`, 8 h, secret derived from `API_TOKEN` (override `ADMIN_SESSION_SECRET`). **Not** main-server auth; guards only the owner change.
 - `GET /api/ponds/status` — live status per pond (logs snapshot, via `getPondStatus()`)
 - `GET /api/dashboard/stats` — system health summary across all ponds
@@ -240,8 +241,6 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - `POST /api/sync` — **main server only** (reference copy here). Bearer `SYNC_TOKEN`. Body `{ readings: [{ time, owner_id, pond_code, temperature, ph, salinity, dissolved_oxygen, source }] }`. Resolves `(owner_id, pond_code)` → `ponds.id` in SQL, bulk insert, `ON CONFLICT (pond_id, time) DO NOTHING`. Returns `{ ok, inserted, duplicate, unknown, skipped, received }`.
 - `GET /api/sync/status` — local. `{ lastSyncAt, pendingCount, unsyncableCount, online, serverReachable, configured, missing }`. `configured` requires BOTH `SYNC_TOKEN` and a UUID `SYNC_OWNER_ID`; `missing` names the first absent one. Probe timeout 3 s (vs the worker's 8 s) and cached 30 s, because an offline Pi is the normal case and the sidebar must not hang.
 - `POST /api/sync/trigger` — local. Runs `runSync` inline for the dashboard button; 409 while one is already running in-process.
-- `GET /api/sync/owner?id=` — **main server (reference copy here)**. Bearer `SYNC_TOKEN`. `{ id, name, email }` or 404 `{ error: "owner_not_found" }` — that body is how the appliance tells "no such owner" from "no such route".
-- `POST /api/sync/ponds` — **main server (reference copy here)**. Bearer `SYNC_TOKEN`. `{ owner_id, ponds: [{ pond_code, name, location? }] }` → creates the missing `(owner_id, pond_code)` rows (`NOT EXISTS`, so it works with a per-owner or a global unique index), returns `{ ok, created, existing }`. Idempotent.
 
 ### Debugging (open)
 - `GET /api/admin/logs` — ingestion logs (with CSV export). Path kept; the admin guard is gone.
@@ -254,7 +253,7 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - Never query `user_pond_access` and never scope by user — every query returns all ponds.
 - Never reintroduce roles, session checks, or a users/ponds admin console. The one exception is `@/lib/adminSession` — a single fixed local credential that guards **only** changing the cloud owner. Do not extend it to gate pages or other routes.
 - Never read `SYNC_OWNER_ID` from `process.env` directly — go through `getSyncOwner(pool)` / `syncConfig(pool)`, or a UI change is silently ignored.
-- Never make sync depend on `/api/sync/owner` or `/api/sync/ponds` existing on the main server — treat a bare 404 as "not deployed" and carry on.
+- Never add code that requires a new route, column or migration on the main server. The live seeme-db.com has `POST /api/sync` and nothing else for this appliance; the clone in `../cloned main/` does not even have that — the deployed receiver is ahead of the repo. Design around what exists.
 - Never open port 5432 to the internet.
 - Pond status always via shared `getPondStatus()` (`@/lib/pondStatus`) — never duplicate.
 - Alert detection: background worker ONLY — never in ingestion route.

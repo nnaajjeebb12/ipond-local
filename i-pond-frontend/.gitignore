@@ -52,3 +52,4 @@ next-env.d.ts
 
 # local database bind mount (dev default for DB_DATA_PATH)
 /data/
+cloned main/

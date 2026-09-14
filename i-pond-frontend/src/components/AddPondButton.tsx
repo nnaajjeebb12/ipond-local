@@ -15,8 +15,9 @@ const ERROR_TEXT: Record<string, string> = {
 
 /**
  * "+ Add Pond" — creates a pond on this appliance. The code it gets (PND-011,
- * PND-012, …) is what the gateway must post under (`pnd: 11`) and what cloud
- * sync registers on the main server before the first batch ships.
+ * PND-012, …) is what the gateway must post under (`pnd: 11`). The main
+ * server is not told: the same code must be created there by hand under
+ * this site's owner, or sync stops on that pond with `pond_mismatch`.
  */
 export default function AddPondButton({ compact = false }: { compact?: boolean }) {
 	const [open, setOpen] = useState(false);
@@ -109,8 +110,9 @@ export default function AddPondButton({ compact = false }: { compact?: boolean }
 							<div className="px-5 py-4 border-b border-[var(--border)]">
 								<h2 className="font-bold text-white">Add Pond</h2>
 								<p className="text-[11px] text-slate-400 mt-0.5">
-									The code is what the gateway posts under (PND-011 → <span className="font-mono">pnd: 11</span>)
-									and what cloud sync creates on the main server.
+									The code is what the gateway posts under (PND-011 → <span className="font-mono">pnd: 11</span>).
+									Create the same code under this site&apos;s account on the main server too, or its readings
+									will wait on the Pi.
 								</p>
 							</div>
 							<div className="p-5 space-y-3">

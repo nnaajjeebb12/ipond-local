@@ -18,9 +18,6 @@ type OwnerStatus = {
 	source: 'db' | 'env' | 'none';
 	name: string | null;
 	target: string;
-	online: boolean;
-	serverReachable: boolean;
-	live: null | { supported: false; detail: string } | { supported: true; found: boolean };
 	admin: boolean;
 };
 
@@ -195,10 +192,10 @@ function AdminLogin({ onDone }: { onDone: () => void }) {
 
 function OwnerCard() {
 	const { data, error, mutate } = useSWR<OwnerStatus>('/api/settings/owner', jsonFetcher, {
-		refreshInterval: 60_000,
 		revalidateOnFocus: false,
 	});
 	const [newId, setNewId] = useState('');
+	const [newName, setNewName] = useState('');
 	const [busy, setBusy] = useState(false);
 	const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
@@ -210,25 +207,27 @@ function OwnerCard() {
 			const res = await fetch('/api/settings/owner', {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ ownerId: newId.trim() }),
+				body: JSON.stringify({ ownerId: newId.trim(), name: newName.trim() }),
 			});
-			const body = (await res.json().catch(() => ({}))) as { error?: string; message?: string; name?: string };
+			const body = (await res.json().catch(() => ({}))) as { error?: string; name?: string };
 			if (!res.ok) {
 				setMsg({
 					text:
-						body.message ??
-						(body.error === 'admin_required'
+						body.error === 'admin_required'
 							? 'Your admin session has expired — log in again.'
 							: body.error === 'invalid_owner_id'
-								? 'That is not a valid owner ID (expected a UUID).'
-								: `Could not change the owner (server said ${res.status}).`),
+								? 'That is not a valid owner ID (expected a UUID like 1b4e28ba-2fa1-11d2-883f-0016d3cca427).'
+								: body.error === 'name_required'
+									? 'Enter the owner name as well.'
+									: `Could not save (server said ${res.status}).`,
 					ok: false,
 				});
 				if (body.error === 'admin_required') await mutate();
 				return;
 			}
 			setNewId('');
-			setMsg({ text: `Owner changed to ${body.name ?? newId}. The next sync will use it.`, ok: true });
+			setNewName('');
+			setMsg({ text: `Saved. Readings now sync as ${body.name}.`, ok: true });
 			await mutate();
 		} catch {
 			setMsg({ text: 'Could not reach the server.', ok: false });
@@ -245,43 +244,18 @@ function OwnerCard() {
 	if (error) return <div className={cardCls}><p className="text-sm text-rose-300">Could not read owner status.</p></div>;
 	if (!data) return <div className={cardCls}><LoadingSpinner /></div>;
 
-	const lookupBlocked = data.live !== null && data.live.supported === false;
-	const changeDisabledReason = !data.serverReachable
-		? data.online
-			? 'Main server unreachable — the owner cannot be verified right now.'
-			: 'Requires internet connection to verify with main server.'
-		: lookupBlocked
-			? `Owner lookup is not available on the main server (${(data.live as { detail: string }).detail}).`
-			: null;
-
 	return (
 		<div className={cardCls}>
-			<div className="flex items-center justify-between flex-wrap gap-3">
-				<div className="flex items-center gap-3">
-					<div className="w-10 h-10 rounded-lg bg-violet-500/10 border border-violet-400/20 flex items-center justify-center text-xl">
-						☁️
-					</div>
-					<div>
-						<h3 className="text-base font-semibold text-white">Cloud owner</h3>
-						<p className="text-[11px] text-slate-500">
-							Every reading this appliance syncs is attributed to this owner on{' '}
-							<span className="font-mono">{data.target.replace(/^https?:\/\//, '')}</span>.
-						</p>
-					</div>
+			<div className="flex items-center gap-3">
+				<div className="w-10 h-10 rounded-lg bg-violet-500/10 border border-violet-400/20 flex items-center justify-center text-xl">
+					☁️
 				</div>
-				<div className="flex items-center gap-2 text-[11px]">
-					<span
-						className={`inline-block w-2 h-2 rounded-full ${
-							data.serverReachable
-								? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.7)]'
-								: data.online
-									? 'bg-amber-400'
-									: 'bg-rose-400'
-						}`}
-					/>
-					<span className="text-slate-300">
-						{data.serverReachable ? 'Main server reachable' : data.online ? 'Main server unreachable' : 'No internet'}
-					</span>
+				<div>
+					<h3 className="text-base font-semibold text-white">Cloud owner</h3>
+					<p className="text-[11px] text-slate-500">
+						Every reading this appliance syncs is attributed to this account on{' '}
+						<span className="font-mono">{data.target.replace(/^https?:\/\//, '')}</span>.
+					</p>
 				</div>
 			</div>
 
@@ -289,18 +263,9 @@ function OwnerCard() {
 				<div>
 					<p className={labelCls}>Owner</p>
 					<p className="text-sm text-slate-100 mt-1">
-						{data.name ?? <span className="text-slate-500 italic">name not confirmed yet</span>}
+						{data.name ?? <span className="text-slate-500 italic">name not entered yet</span>}
 					</p>
-					{data.live && data.live.supported && (
-						<p className={`text-[11px] mt-1 ${data.live.found ? 'text-emerald-300' : 'text-rose-300'}`}>
-							{data.live.found ? 'Confirmed by main server just now' : 'Main server has NO owner with this ID'}
-						</p>
-					)}
-					{data.live && !data.live.supported && (
-						<p className="text-[11px] mt-1 text-slate-500" title={data.live.detail}>
-							Name lookup not available on main server
-						</p>
-					)}
+					<p className="text-[11px] mt-1 text-slate-500">As entered on this appliance</p>
 				</div>
 				<div>
 					<p className={labelCls}>Owner ID</p>
@@ -312,7 +277,7 @@ function OwnerCard() {
 							? 'Set from this page'
 							: data.source === 'env'
 								? 'From SYNC_OWNER_ID in .env'
-								: 'Set SYNC_OWNER_ID in .env, or change it below'}
+								: 'Set SYNC_OWNER_ID in .env, or enter it below'}
 					</p>
 				</div>
 			</div>
@@ -333,27 +298,39 @@ function OwnerCard() {
 								Log out
 							</button>
 						</div>
-						{changeDisabledReason && (
-							<p className="text-[11px] text-amber-300/90 rounded-lg bg-amber-500/10 border border-amber-400/20 px-3 py-2">
-								{changeDisabledReason}
-							</p>
-						)}
-						<div>
-							<label className="block text-[11px] uppercase tracking-wider font-semibold text-slate-400 mb-1">
-								New owner ID
-							</label>
-							<input
-								value={newId}
-								onChange={(e) => setNewId(e.target.value)}
-								placeholder="00000000-0000-0000-0000-000000000000"
-								disabled={!!changeDisabledReason}
-								className={`${inputCls} font-mono disabled:opacity-50`}
-							/>
-							<p className="text-[11px] text-slate-500 mt-1">
-								The ID is verified with the main server before it is saved. Readings already synced
-								stay under the previous owner; pending and future readings go to the new one.
-							</p>
+						<p className="text-[11px] text-amber-300/90 rounded-lg bg-amber-500/10 border border-amber-400/20 px-3 py-2">
+							The ID cannot be checked against the main server — copy it exactly as Soletronix gave it.
+							If it is wrong, sync stops with &ldquo;pond not found under this owner&rdquo; and nothing is lost;
+							correct it here and sync resumes.
+						</p>
+						<div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+							<div>
+								<label className="block text-[11px] uppercase tracking-wider font-semibold text-slate-400 mb-1">
+									Owner name
+								</label>
+								<input
+									value={newName}
+									onChange={(e) => setNewName(e.target.value)}
+									placeholder={data.name ?? 'e.g. Bayside Aquafarm'}
+									maxLength={120}
+									className={inputCls}
+								/>
+							</div>
+							<div>
+								<label className="block text-[11px] uppercase tracking-wider font-semibold text-slate-400 mb-1">
+									Owner ID
+								</label>
+								<input
+									value={newId}
+									onChange={(e) => setNewId(e.target.value)}
+									placeholder={data.ownerId ?? '00000000-0000-0000-0000-000000000000'}
+									className={`${inputCls} font-mono`}
+								/>
+							</div>
 						</div>
+						<p className="text-[11px] text-slate-500">
+							Readings already synced stay under the previous owner; pending and future readings go to the new one.
+						</p>
 						{msg && (
 							<p className={`text-[11px] ${msg.ok ? 'text-emerald-300' : 'text-rose-300'}`} role="alert">
 								{msg.text}
@@ -361,9 +338,9 @@ function OwnerCard() {
 						)}
 						<button
 							type="submit"
-							disabled={busy || !!changeDisabledReason || !newId.trim()}
+							disabled={busy || !newId.trim() || !newName.trim()}
 							className="px-4 py-2 rounded-lg bg-violet-500/20 hover:bg-violet-500/30 border border-violet-400/40 text-violet-200 text-sm font-semibold disabled:opacity-50 transition-colors">
-							{busy ? 'Verifying…' : 'Verify with main server & save'}
+							{busy ? 'Saving…' : 'Save owner'}
 						</button>
 					</form>
 				)}
