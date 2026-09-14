@@ -168,7 +168,7 @@ async function sendOnce(pondId: number, startedAt: number) {
 
 		const ok = res.status === 200 || res.status === 201 || res.status === 202;
 		console.log(
-			`[${timeStamp()}] ${tag} | rtd=${data.rtd} ph=${data.ph} sal=${data.sal} dox=${data.dox} -> ${ok ? '' : 'ERR '}${res.status}  (next in 1s)`,
+			`[${timeStamp()}] ${tag} | rtd=${data.rtd} ph=${data.ph} sal=${data.sal} dox=${data.dox} -> ${ok ? '' : 'ERR '}${res.status}  (next in ${SEND_INTERVAL_MS / 1000}s)`,
 		);
 		if (!ok) {
 			const body = await res.text().catch(() => '');
@@ -191,7 +191,7 @@ async function pondLoop(pondId: number) {
 	const startedAt = Date.now();
 
 	console.log(
-		`[pond-${pondId}] BOOTED. Interval: 1s. First send in ${(bootDelayMs / 1000).toFixed(1)}s.`,
+		`[pond-${pondId}] BOOTED. Interval: ${SEND_INTERVAL_MS / 1000}s. First send in ${(bootDelayMs / 1000).toFixed(1)}s.`,
 	);
 
 	await sleep(bootDelayMs);
