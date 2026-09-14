@@ -93,13 +93,12 @@ export function saveIgnoredAlertIds(ids: Set<string>): void {
 
 export type UnreadCount = {
 	total: number;
-	maintenance: number;
 	alerts: number;
 };
 
 async function unreadFetcher(url: string): Promise<UnreadCount> {
 	const res = await fetch(url, { credentials: 'include' });
-	if (!res.ok) return { total: 0, maintenance: 0, alerts: 0 };
+	if (!res.ok) return { total: 0, alerts: 0 };
 	return (await res.json()) as UnreadCount;
 }
 
@@ -109,5 +108,5 @@ export function useUnreadCount() {
 		unreadFetcher,
 		{ refreshInterval: 60_000, revalidateOnFocus: false },
 	);
-	return data ?? { total: 0, maintenance: 0, alerts: 0 };
+	return data ?? { total: 0, alerts: 0 };
 }

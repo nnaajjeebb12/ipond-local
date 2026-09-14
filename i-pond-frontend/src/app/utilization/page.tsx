@@ -8,7 +8,7 @@ import { useMemo, useState } from 'react';
 const MS_PER_DAY = 24 * 3600 * 1000;
 const MAX_RANGE_DAYS = 90;
 
-type Status = 'online' | 'stale' | 'offline' | 'maintenance';
+type Status = 'online' | 'stale' | 'offline';
 type BreakdownEntry = { minutes: number; percent: number };
 type UtilRow = {
 	pondId: number;
@@ -32,21 +32,18 @@ const STATUS_BAR_BG: Record<Status, string> = {
 	online: 'bg-emerald-400',
 	stale: 'bg-amber-400',
 	offline: 'bg-rose-500',
-	maintenance: 'bg-blue-400',
 };
 
 const STATUS_TEXT: Record<Status, string> = {
 	online: 'text-emerald-300',
 	stale: 'text-amber-300',
 	offline: 'text-rose-300',
-	maintenance: 'text-blue-300',
 };
 
 const STATUS_LABEL: Record<Status, string> = {
 	online: 'Online',
 	stale: 'Stale',
 	offline: 'Offline',
-	maintenance: 'Maintenance',
 };
 
 function todayIso(): string {
@@ -116,14 +113,10 @@ export default function UtilizationPage() {
 		const mostOffline = rows.slice().sort(
 			(a, b) => b.breakdown.offline.minutes - a.breakdown.offline.minutes,
 		)[0];
-		const mostMaint = rows.slice().sort(
-			(a, b) => b.breakdown.maintenance.minutes - a.breakdown.maintenance.minutes,
-		)[0];
 		return {
 			avgOnline: Math.round(avgOnline * 10) / 10,
 			totalOffline: Math.round(totalOffline * 10) / 10,
 			mostOffline,
-			mostMaint,
 		};
 	}, [rows]);
 
@@ -186,11 +179,9 @@ export default function UtilizationPage() {
 			'Online %',
 			'Stale %',
 			'Offline %',
-			'Maintenance %',
 			'Online Min',
 			'Stale Min',
 			'Offline Min',
-			'Maintenance Min',
 		];
 		const body = rows.map((r) => [
 			r.pondName,
@@ -198,11 +189,9 @@ export default function UtilizationPage() {
 			String(r.breakdown.online.percent),
 			String(r.breakdown.stale.percent),
 			String(r.breakdown.offline.percent),
-			String(r.breakdown.maintenance.percent),
 			String(r.breakdown.online.minutes),
 			String(r.breakdown.stale.minutes),
 			String(r.breakdown.offline.minutes),
-			String(r.breakdown.maintenance.minutes),
 		]);
 		const csv = [header, ...body]
 			.map((row) => row.map((c) => `"${c}"`).join(','))
@@ -414,7 +403,7 @@ export default function UtilizationPage() {
 
 				{rows && rows.length > 0 && !emptyMessage && summary && (
 					<>
-						<div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+						<div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
 							<StatTile
 								label="Avg Online %"
 								value={`${summary.avgOnline}%`}
@@ -430,12 +419,6 @@ export default function UtilizationPage() {
 								value={summary.mostOffline.pondName}
 								sub={`${summary.mostOffline.breakdown.offline.minutes} min`}
 								accent="amber"
-							/>
-							<StatTile
-								label="Most Maintenance"
-								value={summary.mostMaint.pondName}
-								sub={`${summary.mostMaint.breakdown.maintenance.minutes} min`}
-								accent="cyan"
 							/>
 						</div>
 
@@ -465,7 +448,6 @@ export default function UtilizationPage() {
 											<Th>Online %</Th>
 											<Th>Stale %</Th>
 											<Th>Offline %</Th>
-											<Th>Maint %</Th>
 											<Th>Tracked (min)</Th>
 										</tr>
 									</thead>
@@ -484,9 +466,6 @@ export default function UtilizationPage() {
 												<td className="px-6 py-3 text-sm font-mono text-rose-300">
 													{r.breakdown.offline.percent}%
 												</td>
-												<td className="px-6 py-3 text-sm font-mono text-blue-300">
-													{r.breakdown.maintenance.percent}%
-												</td>
 												<td className="px-6 py-3 text-sm font-mono text-[var(--text-secondary)]">
 													{r.totalMinutes}
 												</td>
@@ -504,7 +483,7 @@ export default function UtilizationPage() {
 }
 
 function UtilizationBar({ row }: { row: UtilRow }) {
-	const order: Status[] = ['online', 'stale', 'offline', 'maintenance'];
+	const order: Status[] = ['online', 'stale', 'offline'];
 	return (
 		<div>
 			<div className="flex items-center justify-between mb-1.5">
@@ -534,7 +513,7 @@ function UtilizationBar({ row }: { row: UtilRow }) {
 }
 
 function Legend() {
-	const items: Status[] = ['online', 'stale', 'offline', 'maintenance'];
+	const items: Status[] = ['online', 'stale', 'offline'];
 	return (
 		<div className="flex flex-wrap gap-4 mt-4 pt-4 border-t border-[var(--border)]">
 			{items.map((s) => (

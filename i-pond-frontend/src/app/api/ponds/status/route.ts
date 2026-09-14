@@ -8,17 +8,12 @@ export const dynamic = "force-dynamic";
 type Row = {
   pond_id: number;
   last_seen: Date | null;
-  has_maintenance: boolean;
 };
 
 export async function GET() {
   const { rows } = await pool.query<Row>(
     `SELECT p.id AS pond_id,
-            MAX(sr.time) AS last_seen,
-            EXISTS (
-              SELECT 1 FROM maintenance_requests mr
-               WHERE mr.pond_id = p.id AND mr.status = 'pending'
-            ) AS has_maintenance
+            MAX(sr.time) AS last_seen
        FROM ponds p
        LEFT JOIN sensor_readings sr ON sr.pond_id = p.id
         AND sr.time >= NOW() - INTERVAL '25 minutes'
@@ -32,8 +27,8 @@ export async function GET() {
   const out = rows.map((r) => {
     const lastSeenMs = r.last_seen ? r.last_seen.getTime() : null;
     const minutes = lastSeenMs === null ? null : (now - lastSeenMs) / 60_000;
-    const status = getPondStatus(lastSeenMs, r.has_maintenance, now);
-    if (status === "offline" && !r.has_maintenance) {
+    const status = getPondStatus(lastSeenMs, now);
+    if (status === "offline") {
       offlinePondIds.push(r.pond_id);
       // Same convention as the worker: -1 = never received anything.
       offlineMinutes.push(minutes === null ? -1 : Math.round(minutes));
@@ -41,7 +36,6 @@ export async function GET() {
     return {
       pondId: r.pond_id,
       status,
-      hasMaintenance: r.has_maintenance,
       lastSeen: r.last_seen ? r.last_seen.toISOString() : null,
       minutesSinceLastData: minutes,
     };

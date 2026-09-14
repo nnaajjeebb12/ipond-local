@@ -3,7 +3,6 @@
 import AddPondButton from '@/components/AddPondButton';
 import { ErrorMessage, LoadingSpinner } from '@/components/Common';
 import MainLayout from '@/components/MainLayout';
-import RequestMaintenanceButton from '@/components/RequestMaintenanceButton';
 import SensorChart, { type CompareSeries } from '@/components/charts/SensorChart';
 import { useDashboardStats, usePondStatuses, type PondStatus } from '@/hooks/useDashboardStats';
 import {
@@ -241,12 +240,6 @@ export default function DashboardPage() {
 														{(pond as PondWithOwner).company_name}
 													</p>
 												)}
-												<div className="mt-3 pointer-events-auto relative z-20">
-													<RequestMaintenanceButton
-														pondId={Number(pond.id)}
-														pondName={pond.name}
-													/>
-												</div>
 											</div>
 										</div>
 									);
@@ -503,8 +496,7 @@ function PondStatusDot({ status }: { status: PondStatus | undefined }) {
 						? `No data for ${mins} mins — OFFLINE — alarm triggered`
 						: `Last data ${mins} mins ago`;
 
-	const tooltip =
-		key === 'maintenance' ? `Maintenance · ${dataTip}` : `${STATUS_LABEL[key]} · ${dataTip}`;
+	const tooltip = `${STATUS_LABEL[key]} · ${dataTip}`;
 	const animate = key === 'online';
 
 	return (

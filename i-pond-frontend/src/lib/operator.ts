@@ -1,7 +1,7 @@
 /**
  * Local operator identity — the appliance has no users and no sessions.
  *
- * Several tables still reference `owners(id)`: `maintenance_requests.requested_by`
+ * Several tables still reference `owners(id)`: `maintenance_requests.requested_by` (table kept, feature removed)
  * is NOT NULL, and the alert / threshold audit columns are foreign keys. Every
  * write from this appliance is attributed to a single local operator row so
  * those constraints hold and the audit trail stays readable.

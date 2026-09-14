@@ -5,21 +5,12 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const { rows } = await pool.query<{
-    maintenance: string;
-    alerts: string;
-  }>(
-    `SELECT
-       (SELECT COUNT(*) FROM maintenance_requests WHERE status = 'pending') AS maintenance,
-       (SELECT COUNT(*) FROM sensor_alerts
-          WHERE resolved_at IS NULL AND acknowledged_at IS NULL) AS alerts`
+  // Maintenance requests are a main-server feature (owner -> Soletronix
+  // tickets); the appliance has no one on the other end, so it counts alerts only.
+  const { rows } = await pool.query<{ alerts: string }>(
+    `SELECT COUNT(*)::text AS alerts FROM sensor_alerts
+      WHERE resolved_at IS NULL AND acknowledged_at IS NULL`
   );
-
-  const maintenance = Number(rows[0]?.maintenance ?? 0);
   const alerts = Number(rows[0]?.alerts ?? 0);
-  return NextResponse.json({
-    total: maintenance + alerts,
-    maintenance,
-    alerts,
-  });
+  return NextResponse.json({ total: alerts, alerts });
 }

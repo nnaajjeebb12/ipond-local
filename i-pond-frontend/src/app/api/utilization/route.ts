@@ -11,7 +11,7 @@ const MAX_RANGE_DAYS = 90;
 const ONLINE_GAP_SECONDS = 20 * 60;   // gap < 20 min -> online
 const STALE_GAP_SECONDS = 45 * 60;    // gap < 45 min -> stale, else offline
 
-type Status = "online" | "stale" | "offline" | "maintenance";
+type Status = "online" | "stale" | "offline";
 
 type BreakdownEntry = { minutes: number; percent: number };
 
@@ -27,12 +27,6 @@ type SegmentRow = {
   seg_start: Date;
   seg_end: Date;
   status: "online" | "stale" | "offline";
-};
-
-type MaintIntervalRow = {
-  pond_id: number;
-  m_start: Date;
-  m_end: Date;
 };
 
 type PondRow = {
@@ -106,7 +100,6 @@ export async function GET(req: NextRequest) {
         online: { minutes: 0, percent: 0 },
         stale: { minutes: 0, percent: 0 },
         offline: { minutes: 0, percent: 0 },
-        maintenance: { minutes: 0, percent: 0 },
       },
     });
 
@@ -174,25 +167,7 @@ export async function GET(req: NextRequest) {
       [pondIds, fromParam, toParam, ONLINE_GAP_SECONDS, STALE_GAP_SECONDS]
     );
 
-    // Maintenance intervals clipped to the window. A pending request with
-    // resolved_at NULL is treated as ongoing until win_end.
-    const { rows: maintRows } = await pool.query<MaintIntervalRow>(
-      `WITH bounds AS (
-         SELECT $2::timestamptz AS win_start,
-                LEAST(($3::date + INTERVAL '1 day')::timestamptz, NOW()) AS win_end
-       )
-       SELECT mr.pond_id,
-              GREATEST(mr.created_at, b.win_start) AS m_start,
-              LEAST(COALESCE(mr.resolved_at, b.win_end), b.win_end) AS m_end
-         FROM maintenance_requests mr, bounds b
-        WHERE mr.pond_id = ANY($1::int[])
-          AND mr.created_at < b.win_end
-          AND COALESCE(mr.resolved_at, b.win_end) > b.win_start
-        ORDER BY mr.pond_id, m_start`,
-      [pondIds, fromParam, toParam]
-    );
-
-    if (segRows.length === 0 && maintRows.length === 0) {
+    if (segRows.length === 0) {
       return NextResponse.json({
         data: pondRows.map(emptyEntry),
         message:
@@ -200,62 +175,18 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // Merge overlapping maintenance intervals per pond so total maintenance
-    // time is not double-counted.
-    const maintByPond = new Map<number, [number, number][]>();
-    for (const m of maintRows) {
-      const arr = maintByPond.get(m.pond_id) ?? [];
-      arr.push([m.m_start.getTime(), m.m_end.getTime()]);
-      maintByPond.set(m.pond_id, arr);
-    }
-    for (const [pondId, arr] of maintByPond) {
-      arr.sort((a, b) => a[0] - b[0]);
-      const merged: [number, number][] = [];
-      for (const [s, e] of arr) {
-        if (e <= s) continue;
-        if (merged.length && merged[merged.length - 1][1] >= s) {
-          merged[merged.length - 1][1] = Math.max(
-            merged[merged.length - 1][1],
-            e
-          );
-        } else {
-          merged.push([s, e]);
-        }
-      }
-      maintByPond.set(pondId, merged);
-    }
-
     const rawMinutes = new Map<number, Record<Status, number>>();
     const byPond = new Map<number, PondResult>();
     for (const p of pondRows) {
       byPond.set(p.id, emptyEntry(p));
-      rawMinutes.set(p.id, { online: 0, stale: 0, offline: 0, maintenance: 0 });
+      rawMinutes.set(p.id, { online: 0, stale: 0, offline: 0 });
     }
 
-    // Subtract maintenance overlap from each heartbeat-derived segment so the
-    // same wall-clock minute is never counted in two buckets. Maintenance wins.
     for (const seg of segRows) {
       const raw = rawMinutes.get(seg.pond_id);
       if (!raw) continue;
-      const startMs = seg.seg_start.getTime();
-      const endMs = seg.seg_end.getTime();
-      let segSec = (endMs - startMs) / 1000;
-      const intervals = maintByPond.get(seg.pond_id) ?? [];
-      for (const [mStart, mEnd] of intervals) {
-        const overlap =
-          Math.min(endMs, mEnd) - Math.max(startMs, mStart);
-        if (overlap > 0) segSec -= overlap / 1000;
-      }
+      const segSec = (seg.seg_end.getTime() - seg.seg_start.getTime()) / 1000;
       if (segSec > 0) raw[seg.status] += segSec / 60;
-    }
-
-    // Add maintenance minutes (merged intervals already non-overlapping).
-    for (const [pondId, intervals] of maintByPond) {
-      const raw = rawMinutes.get(pondId);
-      if (!raw) continue;
-      let totalSec = 0;
-      for (const [s, e] of intervals) totalSec += (e - s) / 1000;
-      raw.maintenance += totalSec / 60;
     }
 
     // Use RAW minutes for percent so rounded display values cannot push the
@@ -264,12 +195,12 @@ export async function GET(req: NextRequest) {
       const raw = rawMinutes.get(entry.pondId);
       let totalRaw = 0;
       if (raw) {
-        for (const s of ["online", "stale", "offline", "maintenance"] as Status[]) {
+        for (const s of ["online", "stale", "offline"] as Status[]) {
           totalRaw += raw[s];
         }
       }
       entry.totalMinutes = Math.round(totalRaw * 10) / 10;
-      for (const s of ["online", "stale", "offline", "maintenance"] as Status[]) {
+      for (const s of ["online", "stale", "offline"] as Status[]) {
         const m = raw ? raw[s] : 0;
         entry.breakdown[s].minutes = Math.round(m * 10) / 10;
         entry.breakdown[s].percent =

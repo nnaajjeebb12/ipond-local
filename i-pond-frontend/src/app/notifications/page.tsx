@@ -6,19 +6,6 @@ import { acknowledgeAlert, acknowledgeAllAlerts, refreshAlertViews } from '@/hoo
 import { useState } from 'react';
 import useSWR from 'swr';
 
-type MaintenanceRow = {
-	id: string;
-	pondId: number;
-	pondName: string;
-	requestedByName: string | null;
-	message: string;
-	status: 'pending' | 'acknowledged' | 'resolved';
-	createdAt: string;
-	acknowledgedAt: string | null;
-	resolvedAt: string | null;
-	adminNote: string | null;
-};
-
 type AlertRow = {
 	id: string;
 	pondId: number;
@@ -40,12 +27,6 @@ async function fetcher<T>(url: string): Promise<T> {
 	return (await res.json()) as T;
 }
 
-const STATUS_BADGE: Record<MaintenanceRow['status'], string> = {
-	pending: 'bg-amber-500/15 text-amber-300 border-amber-400/30',
-	acknowledged: 'bg-sky-500/15 text-sky-300 border-sky-400/30',
-	resolved: 'bg-emerald-500/15 text-emerald-300 border-emerald-400/30',
-};
-
 const SENSOR_LABEL: Record<string, string> = {
 	temperature: 'Temperature',
 	ph: 'pH',
@@ -62,14 +43,8 @@ function formatDuration(mins: number): string {
 }
 
 export default function NotificationsPage() {
-	const [tab, setTab] = useState<'maintenance' | 'alerts'>('maintenance');
 	const [statusFilter, setStatusFilter] = useState<string>('all');
 	const [pondFilter, setPondFilter] = useState<string>('all');
-
-	const { data: maintenance, error: mErr, isLoading: mLoading, mutate: mMutate } =
-		useSWR<MaintenanceRow[]>('/api/maintenance', fetcher, {
-			refreshInterval: 30_000,
-		});
 
 	const { data: alerts, error: aErr, isLoading: aLoading, mutate: aMutate } = useSWR<AlertRow[]>(
 		'/api/alerts',
@@ -77,44 +52,13 @@ export default function NotificationsPage() {
 		{ refreshInterval: 30_000 },
 	);
 
-	async function patchMaintenance(
-		id: string,
-		next: 'acknowledged' | 'resolved',
-	) {
-		let note: string | null = null;
-		if (next === 'acknowledged') {
-			note = window.prompt('Optional note (e.g., Technician dispatched):') ?? null;
-		}
-		try {
-			const res = await fetch(`/api/maintenance/${id}`, {
-				method: 'PATCH',
-				credentials: 'include',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ status: next, adminNote: note }),
-			});
-			if (!res.ok) throw new Error(`status ${res.status}`);
-			await mMutate();
-		} catch (err) {
-			console.error('patch_maintenance_failed', err);
-		}
-	}
-
 	const ponds = Array.from(
 		new Set(
-			[
-				...(maintenance ?? []).map((m) => `${m.pondId}|${m.pondName}`),
-				...(alerts ?? []).map((a) => `${a.pondId}|${a.pondName}`),
-			].sort(),
+			(alerts ?? []).map((a) => `${a.pondId}|${a.pondName}`).sort(),
 		),
 	).map((s) => {
 		const [id, name] = s.split('|');
 		return { id, name };
-	});
-
-	const filteredMaintenance = (maintenance ?? []).filter((m) => {
-		if (statusFilter !== 'all' && m.status !== statusFilter) return false;
-		if (pondFilter !== 'all' && String(m.pondId) !== pondFilter) return false;
-		return true;
 	});
 
 	const [ackBusy, setAckBusy] = useState<Set<string>>(new Set());
@@ -173,21 +117,8 @@ export default function NotificationsPage() {
 						Notifications
 					</h1>
 					<p className="text-slate-400 mt-1 text-sm">
-						Maintenance requests and sensor alerts across all ponds
+						Sensor alerts across all ponds
 					</p>
-				</div>
-
-				<div className="flex items-center gap-2 border-b border-[var(--border)]">
-					<TabButton
-						active={tab === 'maintenance'}
-						onClick={() => setTab('maintenance')}>
-						Maintenance Requests
-					</TabButton>
-					<TabButton
-						active={tab === 'alerts'}
-						onClick={() => setTab('alerts')}>
-						Sensor Alerts
-					</TabButton>
 				</div>
 
 				<div className="flex flex-wrap items-center gap-3">
@@ -199,19 +130,9 @@ export default function NotificationsPage() {
 						onChange={(e) => setStatusFilter(e.target.value)}
 						className="px-3 py-1.5 rounded-md bg-white/5 border border-[var(--border)] text-sm">
 						<option value="all">All</option>
-						{tab === 'maintenance' ? (
-							<>
-								<option value="pending">Pending</option>
-								<option value="acknowledged">Acknowledged</option>
-								<option value="resolved">Resolved</option>
-							</>
-						) : (
-							<>
-								<option value="active">Active</option>
-								<option value="acknowledged">Acknowledged</option>
-								<option value="resolved">Resolved</option>
-							</>
-						)}
+						<option value="active">Active</option>
+						<option value="acknowledged">Acknowledged</option>
+						<option value="resolved">Resolved</option>
 					</select>
 					<label className="text-[11px] uppercase tracking-wider font-semibold text-slate-400 ml-2">
 						Pond
@@ -229,91 +150,7 @@ export default function NotificationsPage() {
 					</select>
 				</div>
 
-				{tab === 'maintenance' ? (
-					mLoading ? (
-						<LoadingSpinner />
-					) : mErr ? (
-						<ErrorMessage message="Failed to load requests" />
-					) : (
-						<div className="overflow-x-auto rounded-xl border border-[var(--border)]">
-							<table className="min-w-full text-sm">
-								<thead className="bg-white/5 text-[10px] uppercase tracking-wider text-slate-400">
-									<tr>
-										<th className="text-left px-4 py-2.5">Received</th>
-										<th className="text-left px-4 py-2.5">Pond</th>
-										<th className="text-left px-4 py-2.5">By</th>
-										<th className="text-left px-4 py-2.5">Message</th>
-										<th className="text-left px-4 py-2.5">Status</th>
-										<th className="text-left px-4 py-2.5">Actions</th>
-									</tr>
-								</thead>
-								<tbody>
-									{filteredMaintenance.length === 0 ? (
-										<tr>
-											<td
-												colSpan={6}
-												className="text-center py-8 text-slate-500">
-												No requests
-											</td>
-										</tr>
-									) : (
-										filteredMaintenance.map((m) => (
-											<tr
-												key={m.id}
-												className="border-t border-[var(--border)] hover:bg-white/3">
-												<td className="px-4 py-3 text-mono text-[12px] text-slate-300 whitespace-nowrap">
-													{new Date(m.createdAt).toLocaleString()}
-												</td>
-												<td className="px-4 py-3 font-semibold text-slate-100 whitespace-nowrap">
-													{m.pondName}
-												</td>
-												<td className="px-4 py-3 text-slate-300 whitespace-nowrap">
-													{m.requestedByName ?? '—'}
-												</td>
-												<td className="px-4 py-3 text-slate-200 max-w-md">
-													<p>{m.message}</p>
-													{m.adminNote && (
-														<p className="mt-1 text-[11px] text-slate-400 italic">
-															Note: {m.adminNote}
-														</p>
-													)}
-												</td>
-												<td className="px-4 py-3">
-													<span
-														className={`px-2 py-0.5 rounded text-[10px] uppercase tracking-wider font-semibold border ${STATUS_BADGE[m.status]}`}>
-														{m.status}
-													</span>
-												</td>
-												<td className="px-4 py-3 whitespace-nowrap">
-													<div className="flex gap-1.5">
-														{m.status === 'pending' && (
-															<button
-																onClick={() =>
-																	patchMaintenance(m.id, 'acknowledged')
-																}
-																className="px-2.5 py-1 rounded text-[11px] font-semibold bg-sky-500/15 hover:bg-sky-500/25 text-sky-200 border border-sky-400/30">
-																Acknowledge
-															</button>
-														)}
-														{m.status !== 'resolved' && (
-															<button
-																onClick={() =>
-																	patchMaintenance(m.id, 'resolved')
-																}
-																className="px-2.5 py-1 rounded text-[11px] font-semibold bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200 border border-emerald-400/30">
-																Resolve
-															</button>
-														)}
-													</div>
-												</td>
-											</tr>
-										))
-									)}
-								</tbody>
-							</table>
-						</div>
-					)
-				) : aLoading ? (
+				{aLoading ? (
 					<LoadingSpinner />
 				) : aErr ? (
 					<ErrorMessage message="Failed to load alerts" />
@@ -420,27 +257,5 @@ export default function NotificationsPage() {
 				)}
 			</div>
 		</MainLayout>
-	);
-}
-
-function TabButton({
-	children,
-	active,
-	onClick,
-}: {
-	children: React.ReactNode;
-	active: boolean;
-	onClick: () => void;
-}) {
-	return (
-		<button
-			onClick={onClick}
-			className={`px-4 py-2.5 text-sm font-semibold border-b-2 -mb-px transition-colors ${
-				active
-					? 'border-cyan-400 text-cyan-300'
-					: 'border-transparent text-slate-400 hover:text-slate-200'
-			}`}>
-			{children}
-		</button>
 	);
 }

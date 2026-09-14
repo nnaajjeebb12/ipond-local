@@ -31,7 +31,6 @@ export function useDashboardStats() {
 export type PondStatus = {
 	pondId: number;
 	status: PondStatusType;
-	hasMaintenance: boolean;
 	lastSeen: string | null;
 	minutesSinceLastData: number | null;
 };

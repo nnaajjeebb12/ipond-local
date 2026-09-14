@@ -357,12 +357,12 @@ i-pond-frontend/
 │   │   ├── api/             # Route handlers (readings, sync, license, etc.)
 │   │   ├── admin/logs/      # Ingestion logs (kept for local debugging)
 │   │   ├── dashboard/       # All-ponds, per-pond, per-sensor views
-│   │   ├── notifications/   # Maintenance requests + alerts
+│   │   ├── notifications/   # Sensor alerts
 │   │   ├── reports/         # PDF / CSV export center
 │   │   ├── settings/        # Threshold configuration
 │   │   └── utilization/     # Uptime utilization
 │   ├── components/          # SensorCard, AlertPopup, SyncStatus, charts/, MainLayout
-│   ├── hooks/               # useApi, useAlerts, useMaintenance, useThresholds, useDashboardStats, useSystemHealth
+│   ├── hooks/               # useApi, useAlerts, useThresholds, useDashboardStats, useSystemHealth
 │   └── lib/                 # db pool, license, sync, operator, alert checker, pondStatus
 └── public/
 ```

@@ -41,7 +41,7 @@ IoT aquaculture monitoring system. Nationwide PH deployment. 5-year license.
 
 - ESP32 sensors → TimescaleDB (PostgreSQL) → Next.js dashboard with real-time charts.
 - **Local appliance build**: no login, no user accounts, no roles, no tenant scoping. Access is gated by a signed license file only.
-- Single-site: every query returns **all ponds**, always. Alerts, maintenance, utilization tracking.
+- Single-site: every query returns **all ponds**, always. Alerts, utilization tracking. **No maintenance requests** — that is an owner → Soletronix ticket on the main server; on the appliance there is nobody on the other end, so the feature is removed (table kept, unused).
 - **Live**: https://seeme-db.com
 - **GitHub**: private repo
 
@@ -152,7 +152,7 @@ Local appliance, cron every 5min
 - `ingestion_logs` — every ESP32 POST (success + error). Pruned after 30 days by the `ipond_prune_logs` TimescaleDB job (017).
 - `sensor_alerts` — out-of-range alert events. `sensor` allows `temperature/ph/salinity/dissolved_oxygen/connectivity` (migration 014). Fields: `triggered_at`, `consecutive_count`, `last_value`, `optimal_min`, `optimal_max`, `acknowledged_at`, `resolved_at`.
 - `pond_status_log` — heartbeat rows written by ingest (`status='online'`), **at most one per pond per 60 s** — the gateway posts every few seconds and /utilization's finest distinction is a 20-minute gap, so per-reading rows were 60x the writes for no information. Utilization derives stale/offline from row gaps. Pruned after 120 days (017).
-- `maintenance_requests` — owner → admin maintenance tickets.
+- `maintenance_requests` — **unused on the appliance.** Table kept (migrations, FKs); no route reads or writes it. Requests belong on the main server, where Soletronix sees them.
 - (notifications wiring via migration 008.)
 
 ## Licensing (replaces auth)
@@ -187,7 +187,7 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - `/reports` — export center PDF / CSV
 - `/utilization` — utilization rate
 - `/admin/logs` — ingestion logs (kept for local debugging; pond filter reads `/api/ponds`)
-- `/notifications` — maintenance + alerts
+- `/notifications` — sensor alerts (acknowledge one / all)
 - `/settings/thresholds` — optimal range config
 - `/settings/appliance` — license status (client, days left, expiry — always shown, unlike the ≤30-day banner) and the cloud owner panel (id + admin-typed name; change gated by the local admin login, saved without remote verification)
 
@@ -229,13 +229,8 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - `POST /api/alerts/[id]/acknowledge`
 - `POST /api/alerts/acknowledge-all` — `{ ok, acknowledged }`
 
-### Maintenance (open)
-- `GET /api/maintenance` — all requests
-- `POST /api/maintenance` — file a request (404 on unknown pond); `requested_by` = `getOperatorId()`
-- `PATCH /api/maintenance/[id]` — acknowledge / resolve
-
 ### Notifications (open)
-- `GET /api/notifications/unread-count`
+- `GET /api/notifications/unread-count` — `{ total, alerts }` (alerts only; no maintenance)
 
 ### Utilization (open)
 - `GET /api/utilization?ponds=&from=&to=` — uptime % from `pond_status_log`
@@ -254,7 +249,8 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - Never hardcode timezone — always `process.env.APP_TIMEZONE`.
 - Sensor values: `ROUND(::numeric, 2)::float8` in SQL AND `toFixed(2)` in UI.
 - Never query `user_pond_access` and never scope by user — every query returns all ponds.
-- Never reintroduce roles, session checks, or a users/ponds admin console. The one exception is `@/lib/adminSession` — a single fixed local credential that guards **only** changing the cloud owner. Do not extend it to gate pages or other routes.
+- Never reintroduce roles, session checks, or a users/ponds admin console.
+- Never reintroduce maintenance requests on the appliance — a request filed here is seen by no one. Pond status is `online | stale | offline` only; utilization has no maintenance bucket. The one exception is `@/lib/adminSession` — a single fixed local credential that guards **only** changing the cloud owner. Do not extend it to gate pages or other routes.
 - Never read `SYNC_OWNER_ID` from `process.env` directly — go through `getSyncOwner(pool)` / `syncConfig(pool)`, or a UI change is silently ignored.
 - Never add code that requires a new route, column or migration on the main server. The live seeme-db.com has `POST /api/sync` (see `../cloned main/`, commit b0c3b75) and nothing else for this appliance. Design around what exists.
 - Never edit `src/app/api/sync/route.ts` here — it is a verbatim mirror of the main server's receiver. When the main server's copy changes, paste it over and re-check `postBatch` in `src/lib/sync.ts`.

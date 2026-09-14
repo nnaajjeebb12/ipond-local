@@ -1,5 +1,20 @@
 # Changelog
 
+## [2026-09-14] — Maintenance requests removed from the appliance
+
+### Changed
+- **"Request Maintenance" is gone from the local dashboard**, along with the Maintenance Requests tab on `/notifications`, `/api/maintenance` (GET/POST/PATCH), `RequestMaintenanceButton`, and `useMaintenance`. A request filed on the Pi went into the Pi's own database where nobody at Soletronix could see it — the feature only makes sense on the main server, and the main server is not to be changed, so there is nothing to forward to.
+- The read side is cleaned up with it rather than left showing a permanent 0: pond status is `online | stale | offline` (`getPondStatus(lastSeenMs, nowMs)` — the `hasMaintenance` argument is gone), `/api/ponds/status` no longer queries `maintenance_requests`, `/api/utilization` drops the maintenance interval merging and the `maintenance` bucket, the utilization page loses the "Most Maintenance" tile, the "Maint %" column, the legend entry and the two CSV columns, and the notification badge counts open alerts only (`{ total, alerts }`).
+- `/notifications` is now a single alerts view with the same Status/Pond filters and acknowledge actions.
+- `maintenance_requests` stays in the schema (migrations, FK to `owners`) but nothing reads or writes it.
+
+### Files Modified
+- src/app/api/maintenance/route.ts, src/app/api/maintenance/[id]/route.ts, src/components/RequestMaintenanceButton.tsx, src/hooks/useMaintenance.ts *(deleted)*
+- src/app/notifications/page.tsx, src/app/dashboard/page.tsx, src/app/utilization/page.tsx
+- src/app/api/notifications/unread-count/route.ts, src/app/api/ponds/status/route.ts, src/app/api/utilization/route.ts
+- src/lib/pondStatus.ts, src/hooks/useAlerts.ts, src/hooks/useDashboardStats.ts
+- CLAUDE.md, README.md
+
 ## [2026-09-14] — Cloud owner by signing in, not by UUID; pond import from the main server
 
 ### Changed
