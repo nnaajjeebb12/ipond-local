@@ -7,12 +7,12 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "seed:pond1": "node --experimental-strip-types scripts/seed-pond1-today.ts",
+    "seed:pond1": "tsx scripts/seed-pond1-today.ts",
     "alert-worker": "npx tsx scripts/alert-worker.ts",
-    "license:generate": "node --experimental-strip-types scripts/generate-license.ts",
+    "license:generate": "tsx scripts/generate-license.ts",
     "sync-worker": "tsx scripts/sync-worker.ts",
     "serial-listener": "node scripts/serial-listener.js",
-    "simulate": "node --experimental-strip-types scripts/simulate-esp32.ts"
+    "simulate": "tsx scripts/simulate-esp32.ts"
   },
   "dependencies": {
     "axios": "^1.15.0",

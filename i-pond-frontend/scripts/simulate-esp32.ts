@@ -1,6 +1,6 @@
 // scripts/simulate-esp32.ts
 // 10 independent fake ESP32 devices. Each pond runs its own loop.
-// Run: npm run simulate   (Node 22+, uses --experimental-strip-types)
+// Run: npm run simulate   (tsx; works on the Pi's Node 20)
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
