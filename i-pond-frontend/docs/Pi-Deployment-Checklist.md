@@ -1188,8 +1188,24 @@ backlog with `curl -s localhost:3000/api/sync/status`.
 
 ### Cannot reach `ipond.local` from a laptop
 
-Use the IP address instead (`hostname -I` on the Pi). Some networks and Windows
-setups do not resolve `.local` names.
+The `.local` name is advertised by the Pi itself (mDNS, via `avahi-daemon`).
+Raspberry Pi OS ships it; **Ubuntu Server does not** — install and name it:
+
+```bash
+sudo apt install -y avahi-daemon
+sudo sed -i 's/^#*host-name=.*/host-name=ipond/' /etc/avahi/avahi-daemon.conf
+sudo systemctl enable --now avahi-daemon
+sudo systemctl restart avahi-daemon
+systemctl status avahi-daemon --no-pager | grep "running \["
+```
+
+> **You should see:** `avahi-daemon: running [ipond.local]`. Use whatever
+> `host-name` you set — the site in this guide's example is `soletronix`, so
+> it answers at `http://soletronix.local`.
+
+If it still does not resolve, use the IP address (`hostname -I` on the Pi).
+Some networks block mDNS, and Windows needs the Bonjour service (installed by
+iTunes or Apple's Bonjour Print Services) to resolve `.local` names.
 
 ---
 
