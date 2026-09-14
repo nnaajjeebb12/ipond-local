@@ -166,7 +166,7 @@ Local appliance, cron every 5min
 
 - No roles anywhere. No `session`, no `auth()`, no `requireAdmin()`. Every endpoint is open.
 - No tenant scoping. `user_pond_access` is **never queried**; every route returns all ponds.
-- `src/lib/operator.ts` → `getOperatorId()` is the only remnant: the first `owners` row by `created_at` (fallback `00000000-0000-0000-0000-000000000001`), cached per process. It is **identity for record-keeping only, not authorization** — it exists because `maintenance_requests.requested_by` is NOT NULL and the alert/threshold audit columns are FKs to `owners(id)`.
+- `src/lib/operator.ts` → `getOperatorId()` is the only remnant: the first `owners` row by `created_at`, cached per process. **Self-healing**: if `owners` is empty it INSERTs the seed's operator row (`00000000-0000-0000-0000-000000000001`) on first use. Before this, a Pi that skipped the seed got a **500 on every acknowledge / maintenance / threshold write** (`acknowledged_by` FK to a non-existent row) and the UI showed nothing. It is **identity for record-keeping only, not authorization** — it exists because `maintenance_requests.requested_by` is NOT NULL and the alert/threshold audit columns are FKs to `owners(id)`.
 - Where a route used to answer 403 for a pond outside the caller's access, it now answers **404 if the pond does not exist** and serves it otherwise.
 
 ## Pages
@@ -324,6 +324,7 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - Never reintroduce Vercel config (`vercel.json`, `NEXTAUTH_URL`, `AUTH_SECRET`) — this is a self-hosted Pi build.
 - Never ship a standalone build without copying `public/` and `.next/static/`.
 - Never seed a fresh appliance with `001_seed.sql` — use `002_local_appliance.sql`.
+- Never swallow a failed write into `console.error` alone — surface it in the UI. "Loads then nothing happens" is a 500 the user cannot see.
 - Never skip updating CLAUDE.md and CHANGELOG.md after a change.
 
 ## Documentation

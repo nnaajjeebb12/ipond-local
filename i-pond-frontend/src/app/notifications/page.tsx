@@ -119,15 +119,18 @@ export default function NotificationsPage() {
 
 	const [ackBusy, setAckBusy] = useState<Set<string>>(new Set());
 	const [ackAllBusy, setAckAllBusy] = useState(false);
+	const [ackError, setAckError] = useState<string | null>(null);
 	const openAlertCount = (alerts ?? []).filter((a) => !a.acknowledgedAt && !a.resolvedAt).length;
 
 	async function ackOne(id: string) {
 		setAckBusy((s) => new Set(s).add(id));
+		setAckError(null);
 		try {
 			await acknowledgeAlert(id);
 			await Promise.all([aMutate(), refreshAlertViews()]);
 		} catch (err) {
 			console.error('ack_failed', err);
+			setAckError('Could not acknowledge — the server rejected it.');
 		} finally {
 			setAckBusy((s) => {
 				const n = new Set(s);
@@ -140,11 +143,13 @@ export default function NotificationsPage() {
 	async function ackAll() {
 		if (!window.confirm(`Acknowledge all ${openAlertCount} open alert${openAlertCount === 1 ? '' : 's'}?`)) return;
 		setAckAllBusy(true);
+		setAckError(null);
 		try {
 			await acknowledgeAllAlerts();
 			await Promise.all([aMutate(), refreshAlertViews()]);
 		} catch (err) {
 			console.error('ack_all_failed', err);
+			setAckError('Could not acknowledge — the server rejected it.');
 		} finally {
 			setAckAllBusy(false);
 		}
@@ -314,6 +319,9 @@ export default function NotificationsPage() {
 					<ErrorMessage message="Failed to load alerts" />
 				) : (
 					<div className="space-y-3">
+					{ackError && (
+						<p className="px-1 text-[12px] text-rose-300" role="alert">{ackError}</p>
+					)}
 					{openAlertCount > 0 && (
 						<div className="flex items-center justify-between gap-3 px-1">
 							<p className="text-[12px] text-slate-400">

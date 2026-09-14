@@ -8,11 +8,20 @@
  *
  * This is identity for record-keeping only. It grants nothing — there is no
  * authorization left to grant.
+ *
+ * Self-healing: if the owners table is empty (a Pi that never ran the seed, or
+ * was seeded by hand), the operator row is created on first use. Without this,
+ * every acknowledge / maintenance / threshold write fails a foreign-key check
+ * with a 500 and the UI just silently does nothing.
  */
 import { pool } from "@/lib/db";
 
-/** Seeded admin (db/seeds/001_seed.sql) — fallback when the lookup finds nothing. */
-const FALLBACK_OPERATOR_ID = "00000000-0000-0000-0000-000000000001";
+/** Matches db/seeds/002_local_appliance.sql so a later seed run is a no-op. */
+const OPERATOR = {
+  id: "00000000-0000-0000-0000-000000000001",
+  name: "Local Operator",
+  email: "operator@localhost",
+};
 
 let cached: string | null = null;
 
@@ -20,16 +29,24 @@ let cached: string | null = null;
 export async function getOperatorId(): Promise<string> {
   if (cached !== null) return cached;
 
-  let id = FALLBACK_OPERATOR_ID;
-  try {
-    const { rows } = await pool.query<{ id: string }>(
-      `SELECT id FROM owners ORDER BY created_at ASC LIMIT 1`
-    );
-    if (rows[0]) id = rows[0].id;
-  } catch {
-    // DB unreachable — fall back to the seeded id.
+  const { rows } = await pool.query<{ id: string }>(
+    `SELECT id FROM owners ORDER BY created_at ASC LIMIT 1`
+  );
+  if (rows[0]) {
+    cached = rows[0].id;
+    return cached;
   }
 
-  cached = id;
+  // No owner at all — create the one the seed would have. ON CONFLICT covers
+  // a race with a concurrent first request or a seed running at the same time.
+  await pool.query(
+    `INSERT INTO owners (id, name, email, role, password_hash)
+     VALUES ($1, $2, $3, 'admin', '')
+     ON CONFLICT (id) DO NOTHING`,
+    [OPERATOR.id, OPERATOR.name, OPERATOR.email]
+  );
+  console.warn("operator_row_created", OPERATOR.id);
+
+  cached = OPERATOR.id;
   return cached;
 }

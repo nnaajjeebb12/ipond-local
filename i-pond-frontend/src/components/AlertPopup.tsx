@@ -37,6 +37,7 @@ export default function AlertPopup() {
 	const [ignoredIds, setIgnoredIds] = useState<Set<string>>(new Set());
 	const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
 	const [bulkBusy, setBulkBusy] = useState(false);
+	const [error, setError] = useState<string | null>(null);
 
 	useEffect(() => {
 		setIgnoredIds(loadIgnoredAlertIds());
@@ -71,11 +72,13 @@ export default function AlertPopup() {
 
 	async function onAck(id: string) {
 		setBusyIds((s) => new Set(s).add(id));
+		setError(null);
 		try {
 			await acknowledgeAlert(id);
 			await refreshAlertViews();
 		} catch (err) {
 			console.error('ack_failed', err);
+			setError('Could not acknowledge — the server rejected it. Try again, or check the server log.');
 		} finally {
 			setBusyIds((s) => {
 				const n = new Set(s);
@@ -87,11 +90,13 @@ export default function AlertPopup() {
 
 	async function onAckAll() {
 		setBulkBusy(true);
+		setError(null);
 		try {
 			await acknowledgeAllAlerts();
 			await refreshAlertViews();
 		} catch (err) {
 			console.error('ack_all_failed', err);
+			setError('Could not acknowledge — the server rejected it. Try again, or check the server log.');
 		} finally {
 			setBulkBusy(false);
 		}
@@ -138,6 +143,11 @@ export default function AlertPopup() {
 						<span className="text-slate-400">Ignore</span> hides an alert on this device only — it stays
 						active in Notifications. <span className="text-slate-400">Acknowledge</span> marks it handled.
 					</p>
+					{error && (
+						<p className="mt-2 text-[11px] text-rose-300 leading-snug" role="alert">
+							{error}
+						</p>
+					)}
 				</div>
 				<div className="p-4 space-y-3">
 					{visible.map((a) => {

@@ -1,5 +1,18 @@
 # Changelog
 
+## [2026-09-14] — Fix: Acknowledge did nothing on a database with no owner row
+
+### Changed
+- **`getOperatorId()` is self-healing.** If the `owners` table is empty it now creates the seed's operator row (`00000000-…-0001`, "Local Operator") on first use, `ON CONFLICT DO NOTHING`. Previously it *returned* that UUID without checking it existed, and every write that stamps it — alert acknowledge (single and all), maintenance request POST/PATCH, threshold PATCH — failed with `violates foreign key constraint "sensor_alerts_acknowledged_by_fkey"` → 500.
+- **Failures are now visible.** The popup and the notifications page showed a spinner, then nothing, because the `catch` only wrote to the browser console. Both now show a red message ("Could not acknowledge — the server rejected it…") so a failing request looks like a failing request.
+
+### Files Modified
+- src/lib/operator.ts, src/components/AlertPopup.tsx, src/app/notifications/page.tsx, CLAUDE.md
+
+### Notes
+- Reported as "click Acknowledge, it loads, the popup is still there". Reproduced by emptying `owners`: acknowledge → 500 with the FK error in the server log, nothing in the UI. After the fix on the same empty table: 200, operator row auto-created, maintenance POST also works, and running `002_local_appliance.sql` afterwards is a no-op.
+- This is the likely state of any Pi whose database was built with `run_remaining.sh` and seeded by hand rather than with `002_local_appliance.sql`. No action needed there now — the row is created on the next write.
+
 ## [2026-09-14] — Firmware receive path restored, alert Ignore/Acknowledge all, sync hardening
 
 ### Changed
