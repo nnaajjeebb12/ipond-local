@@ -149,8 +149,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "invalid_payload" }, { status: 400 });
   }
 
+  // Any positive pond number: ponds are created from the dashboard now, so
+  // PND-011 and up are legitimate. An unknown code is still rejected below
+  // (unknown_pond), which is the check that matters.
   const pndNum = Math.trunc(d.pnd);
-  if (pndNum < 1 || pndNum > 10) {
+  if (pndNum < 1 || pndNum > 9999) {
     await writeLog({
       pondId: null,
       pondCode: null,

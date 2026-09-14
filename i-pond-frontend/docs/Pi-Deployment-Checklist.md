@@ -986,6 +986,32 @@ docker compose up -d                  # recreates the database container with th
 > `docker exec ipond-timescaledb psql -U soletronix -d ipond -c "SELECT count(*) FROM sensor_readings_15m"`
 > returns a number greater than zero.
 
+### Adding a pond later
+
+1. Dashboard → **+ Add Pond** (next to "Pond Network"). Give it a name; the
+   code is assigned automatically (`PND-011`, `PND-012`, …).
+2. Set the sensor board / gateway for that pond to post the matching number
+   (`PND-011` → `pnd: 11`).
+3. Nothing else. On the next sync the pond is created on the main server
+   automatically — if the main server has the `/api/sync/ponds` endpoint
+   (Soletronix will confirm). If not, ask Soletronix to create the pond there
+   under this site's owner; until then its readings stay pending on the Pi.
+
+### Checking the license and the cloud owner
+
+Sidebar → **Appliance**. The license card shows who it is licensed to, the
+days remaining and the expiry date — always, not only near expiry. The cloud
+owner card shows which main-server owner this Pi's data goes to.
+
+To change the owner (rare — only when Soletronix tells you to):
+
+- [ ] The Pi must have internet (the card shows "Main server reachable").
+- [ ] Click **Admin login** — username `soletronix`, password
+      `Soletronix@pi2026`.
+- [ ] Paste the new owner ID and click **Verify with main server & save**. It
+      is checked with the main server before it is saved; a wrong ID is
+      refused.
+
 ### Backing up the database
 
 ```bash

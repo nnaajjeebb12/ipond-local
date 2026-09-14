@@ -37,7 +37,7 @@ export async function GET() {
       countUnsyncable(pool),
       onlineCached(),
     ]);
-    const cfg = syncConfig();
+    const cfg = await syncConfig(pool);
 
     return NextResponse.json({
       lastSyncAt: lastAt,

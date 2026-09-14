@@ -69,6 +69,12 @@ const ICONS = {
 			<rect x="17" y="13" width="4" height="8" rx="1" />
 		</svg>
 	),
+	appliance: (
+		<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5">
+			<rect x="3" y="4" width="18" height="12" rx="2" />
+			<path d="M8 20h8M12 16v4" />
+		</svg>
+	),
 } as const;
 
 const HEALTH_STYLES: Record<
@@ -131,6 +137,7 @@ export default function MainLayout({ children }: LayoutProps) {
 			badge: unread.total,
 		},
 		{ href: '/admin/logs', label: 'Ingestion Logs', icon: 'logs' },
+		{ href: '/settings/appliance', label: 'Appliance', icon: 'appliance' },
 	];
 
 	const SidebarContent = (

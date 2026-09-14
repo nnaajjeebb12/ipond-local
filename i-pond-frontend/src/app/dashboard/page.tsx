@@ -1,5 +1,6 @@
 'use client';
 
+import AddPondButton from '@/components/AddPondButton';
 import { ErrorMessage, LoadingSpinner } from '@/components/Common';
 import MainLayout from '@/components/MainLayout';
 import RequestMaintenanceButton from '@/components/RequestMaintenanceButton';
@@ -199,9 +200,12 @@ export default function DashboardPage() {
 								<h2 className="text-xs uppercase tracking-[0.18em] font-semibold text-slate-400">
 									Pond Network
 								</h2>
-								<span className="text-[10px] text-slate-500 font-mono">
-									tap to view
-								</span>
+								<div className="flex items-center gap-3">
+									<span className="text-[10px] text-slate-500 font-mono">
+										tap to view
+									</span>
+									<AddPondButton compact />
+								</div>
 							</div>
 							<div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
 								{ponds.map((pond) => {
@@ -385,7 +389,10 @@ export default function DashboardPage() {
 						</div>
 					</>
 				) : (
-					<ErrorMessage message="No ponds available" />
+					<div className="space-y-4">
+						<ErrorMessage message="No ponds available" />
+						<AddPondButton />
+					</div>
 				)}
 			</div>
 		</MainLayout>

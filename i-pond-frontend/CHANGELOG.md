@@ -1,5 +1,32 @@
 # Changelog
 
+## [2026-09-14] — Add ponds from the dashboard, license status page, cloud-owner panel with admin gate
+
+### Changed
+- **`POST /api/ponds` + "+ Add Pond"** on the dashboard (Pond Network header, and the empty state). Name required; `pond_code` auto-numbers to the next free `PND-###` after the highest in use, under a table lock so two operators cannot draw the same code; explicit codes are upper-cased and validated; 409 on a taken code. Verified: 7 request variants incl. auto/explicit/duplicate/bad-number.
+- **Ingest accepts any positive `pnd` (1–9999)**, was hard-capped at 10. Without this an added pond could never receive data. Unknown codes still 404.
+- **Ponds are created on the main server automatically before their readings ship.** The worker calls `POST {main}/api/sync/ponds` for every pond with pending readings, then sends the batch. Verified end to end against a second instance on a second database: 4 ponds created under the owner, 7 readings shipped, `unknown = 0`; second run creates nothing.
+- **Cloud owner is now a runtime setting.** New `app_settings` table (migration 019). `getSyncOwner()` reads `sync_owner_id` from the DB first and `SYNC_OWNER_ID` from `.env` as the seed. Rationale: `.env` cannot be the store — `process.env` is fixed at start, standalone bakes it into the bundle, and a systemd `EnvironmentFile` overrides it anyway. `syncConfig(pool)` is async now; `/api/sync/status` and the worker both use it. Verified: after a change, sync ran under the new owner with no restart and the new pond was created under *that* owner on the main server.
+- **`/settings/appliance` page** ("Appliance" in the sidebar): license card — client, days remaining, expiry, status — always visible (the ≤30-day banner is unchanged); cloud owner card — id, source (`.env` / set here), last confirmed name, live check, main-server reachability, and the change form.
+- **Local admin gate for changing the owner** (`@/lib/adminSession`, `/api/admin/login|logout|session`): fixed credential `soletronix` / `Soletronix@pi2026`, timing-safe compare, HMAC-signed 8 h cookie, secret derived from `API_TOKEN`. Not main-server auth; guards nothing else. `PUT /api/settings/owner` also requires the main server reachable (503 otherwise, with the "Requires internet connection to verify with main server" message) and the owner to exist there (404) before saving.
+- **Two additive main-server endpoints as reference copies** (nothing in the main repo is modified): `GET /api/sync/owner?id=` and `POST /api/sync/ponds`, both Bearer `SYNC_TOKEN`. Until they are deployed on seeme-db.com the appliance degrades gracefully — verified against a bare-404 server and an unreachable host: pond registration logs "main server has no /api/sync/ponds endpoint" and the run continues on the old `pond_mismatch` path; the owner panel shows the id with "name lookup not available" and disables the change form with the reason.
+
+### Files Modified
+- db/migrations/019_app_settings.sql *(new)*, src/lib/settings.ts *(new)*, src/lib/adminSession.ts *(new)*
+- src/app/api/ponds/route.ts, src/app/api/send-sensor-data/route.ts
+- src/lib/sync.ts, src/app/api/sync/status/route.ts
+- src/app/api/sync/owner/route.ts *(new, main-server reference)*, src/app/api/sync/ponds/route.ts *(new, main-server reference)*
+- src/app/api/settings/owner/route.ts *(new)*, src/app/api/admin/login|logout|session/route.ts *(new)*
+- src/components/AddPondButton.tsx *(new)*, src/app/dashboard/page.tsx, src/components/MainLayout.tsx
+- src/app/settings/appliance/page.tsx *(new)*
+- .env.example, CLAUDE.md, README.md, docs/Pi-Deployment-Checklist.md
+
+### Notes
+- **Main server: nothing changed there, by request.** The only local clone (`5. github iPond/i-pond-frontend`) has no `/api/sync` route on any branch, so the deployed receiver's source is elsewhere. To get the seamless pond path and owner names, copy the two reference files into the main server's `src/app/api/sync/owner/route.ts` and `src/app/api/sync/ponds/route.ts` — no existing file is touched. `/api/sync/ponds` inserts `(owner_id, name, pond_code, location)`; if the main server's `ponds` table has other NOT NULL columns, add defaults there.
+- `/api/license` already returned the full status unconditionally; item 5 needed no change.
+- The hardcoded admin credential is in source (`adminSession.ts`) as specified. Anyone with the repo can read it; treat it as a convenience gate on a trusted LAN, not a secret.
+- Dev-machine note: two `next dev` instances must not share one project directory — they corrupt each other's `.next/` and produce random HTML 404s. The second instance was run from a copy with a `node_modules` junction on the same drive.
+
 ## [2026-09-14] — Dashboard performance on the Pi: rollups, compression, fsync-free ingest
 
 ### Changed

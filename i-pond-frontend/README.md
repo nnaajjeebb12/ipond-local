@@ -275,6 +275,26 @@ recreate the container too — the data is a bind mount and is untouched:
 docker compose up -d
 ```
 
+### Adding ponds and the cloud owner
+
+- **Add a pond** from the dashboard ("+ Add Pond"). It gets the next free
+  `PND-###` code; set the gateway to post that number (`PND-011` → `pnd: 11`).
+  The sync worker creates the pond on the main server before its first
+  readings ship — provided the main server has the `/api/sync/ponds` endpoint
+  (see below).
+- **Settings → Appliance** shows the license (client, days left, expiry) and
+  the cloud owner this Pi reports to. Changing the owner needs the local admin
+  login (`soletronix` / `Soletronix@pi2026`), an internet connection, and the
+  new owner must exist on the main server. The change is stored in the
+  database and takes effect on the next sync; `SYNC_OWNER_ID` in `.env` is
+  only the initial value.
+- **Main server (seeme-db.com):** two optional, self-contained routes make the
+  above seamless — copy `src/app/api/sync/owner/route.ts` and
+  `src/app/api/sync/ponds/route.ts` from this repo into the same paths there.
+  Nothing else on the main server changes. Without them the appliance still
+  works: ponds must then be created on the main server by hand, and the owner
+  panel shows the id without a name.
+
 ### Database performance notes
 
 The gateway posts a reading every few seconds, so `sensor_readings` grows by
