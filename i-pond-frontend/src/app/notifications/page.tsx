@@ -71,7 +71,7 @@ export default function NotificationsPage() {
 		setAckError(null);
 		try {
 			await acknowledgeAlert(id);
-			await Promise.all([aMutate(), refreshAlertViews()]);
+			void Promise.all([aMutate(), refreshAlertViews()]);
 		} catch (err) {
 			console.error('ack_failed', err);
 			setAckError('Could not acknowledge — the server rejected it.');
@@ -90,7 +90,7 @@ export default function NotificationsPage() {
 		setAckError(null);
 		try {
 			await acknowledgeAllAlerts();
-			await Promise.all([aMutate(), refreshAlertViews()]);
+			void Promise.all([aMutate(), refreshAlertViews()]);
 		} catch (err) {
 			console.error('ack_all_failed', err);
 			setAckError('Could not acknowledge — the server rejected it.');

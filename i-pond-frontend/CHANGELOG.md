@@ -1,5 +1,26 @@
 # Changelog
 
+## [2026-09-14] — Alerts eased: no re-nagging after acknowledge/ignore, instant popup, sustained-window sensor rule
+
+### Changed
+- **Root cause of "the alert keeps coming back":** acknowledging marked the row, but the *condition* was re-checked and a **new** row inserted — by `/api/ponds/status` on the next 30 s poll for any pond still offline, and by the worker every 5 min for a sensor still out of range. Acknowledging bought 30 seconds of quiet.
+- **Re-alert cooldown (24 h)** in both the worker (`mayRaise`) and `/api/ponds/status`: the same pond + sensor is not raised again while an alert is open or was acknowledged within the cooldown. Verified: 2 polls → 1 alert per offline pond; acknowledge → 2 more polls → 0 new; acknowledgement aged past 24 h → raised again.
+- **Popup suppression is per condition and per session.** Ignore *or* acknowledge records `pondId:sensor` in `sessionStorage`; that pond + sensor does not pop again in this tab even if the server raises a fresh row. New tab / new day starts clean. Replaces the per-alert-id `localStorage` list, which a re-raised row (new id) bypassed.
+- **Popup is optimistic** — cards vanish on click; the POST and the three view refetches run in the background; a failure brings the card back with the reason. This is the "why is it slow" answer for the UI part: the button used to await the POST *plus* refetches of `/api/alerts/active`, `/api/alerts` and the unread count, each queued behind the saturated dashboard queries on the current Pi build. (The other part is the pending performance update.) `/notifications` acknowledge no longer awaits the refetches either.
+- **Sensor alert rule is a sustained window:** every reading in the last 30 minutes out of range, minimum 7 readings — was "last 7 readings", i.e. under a minute at the gateway's cadence. Popup text now says so instead of the hardcoded "~1h 45m". **Sensor alerts auto-resolve** when a reading comes back in range (connectivity already did).
+- **Ponds that have never sent a reading are not alerted on** (worker and status route) — no gateway, nothing to lose; still shown offline. On a site with one gateway and ten seeded ponds this alone removes nine permanent alerts.
+- **`/api/ponds/status` reads the true last reading per pond** (LATERAL `ORDER BY time DESC LIMIT 1`, index-only backward scan) instead of "last reading in the past 25 minutes". The old window made a pond offline for an hour look identical to one that never sent data — the popup said "no data for an unknown duration" — and would have defeated the never-seen rule. `minutesSinceLastData` is now real for every pond.
+- `AlertPopup` uses `useSyncExternalStore` for the mounted flag (the lint rule rejects setState in an effect).
+
+### Files Modified
+- src/components/AlertPopup.tsx, src/hooks/useAlerts.ts, src/app/notifications/page.tsx
+- scripts/alert-worker.ts, src/app/api/ponds/status/route.ts
+- CLAUDE.md
+
+### Notes
+- Not tested in a browser (dev license gate). The worker and status route were exercised against the dev DB: never-seen ponds skipped, a 30-minute-old acknowledgement respected, an aged one re-raised, EXPLAIN shows index-only scans.
+- The 24 h cooldown and the 30 min / 7-reading window are constants at the top of `scripts/alert-worker.ts` (cooldown duplicated in the status route — keep them equal).
+
 ## [2026-09-14] — Maintenance requests removed from the appliance
 
 ### Changed

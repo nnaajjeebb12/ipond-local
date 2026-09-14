@@ -64,17 +64,27 @@ export async function acknowledgeAllAlerts(): Promise<number> {
 	return body.acknowledged ?? 0;
 }
 
-const IGNORED_KEY = 'ipond.ignoredAlertIds';
+const HANDLED_KEY = 'ipond.alertsHandledThisSession';
+
+/** What the popup suppresses on: the CONDITION, not the alert row. */
+export function alertKey(a: Pick<ActiveAlert, 'pondId' | 'sensor'>): string {
+	return `${a.pondId}:${a.sensor}`;
+}
 
 /**
- * "Ignore" is a client-side choice: the alert stays open on the server and in
- * /notifications, it just stops popping up on this browser. Persisted so a
- * page reload does not nag again; pruned against the live list so an alert
- * that is later acknowledged or resolved drops out, and a NEW alert still pops.
+ * Once an alert is ignored OR acknowledged in this browser session, the same
+ * condition (pond + sensor) does not pop up again until the tab is closed —
+ * even if the server raises a fresh alert row for it (it re-checks every few
+ * minutes and a pond that stays offline would otherwise nag every time).
+ *
+ * sessionStorage, deliberately: a new tab or a new day starts clean, so a
+ * condition that is still going on is seen again eventually. Ignored alerts
+ * remain open on the server and in /notifications; acknowledged ones are
+ * marked there.
  */
-export function loadIgnoredAlertIds(): Set<string> {
+export function loadHandledAlertKeys(): Set<string> {
 	try {
-		const raw = localStorage.getItem(IGNORED_KEY);
+		const raw = sessionStorage.getItem(HANDLED_KEY);
 		if (!raw) return new Set();
 		const arr = JSON.parse(raw);
 		return new Set(Array.isArray(arr) ? arr.filter((x) => typeof x === 'string') : []);
@@ -83,11 +93,11 @@ export function loadIgnoredAlertIds(): Set<string> {
 	}
 }
 
-export function saveIgnoredAlertIds(ids: Set<string>): void {
+export function saveHandledAlertKeys(keys: Set<string>): void {
 	try {
-		localStorage.setItem(IGNORED_KEY, JSON.stringify([...ids]));
+		sessionStorage.setItem(HANDLED_KEY, JSON.stringify([...keys]));
 	} catch {
-		// storage unavailable — ignore lasts for this page only
+		// storage unavailable — suppression lasts for this page only
 	}
 }
 

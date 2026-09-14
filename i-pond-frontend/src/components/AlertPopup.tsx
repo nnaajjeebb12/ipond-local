@@ -1,14 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import {
 	useActiveAlerts,
 	acknowledgeAlert,
 	acknowledgeAllAlerts,
+	alertKey,
 	refreshAlertViews,
-	loadIgnoredAlertIds,
-	saveIgnoredAlertIds,
+	loadHandledAlertKeys,
+	saveHandledAlertKeys,
 	type ActiveAlert,
 } from '@/hooks/useAlerts';
 import { fmt } from '@/lib/pondStatus';
@@ -28,82 +29,70 @@ const SENSOR_LABELS: Record<string, { name: string; unit: string }> = {
  *                 count, and appears as "acknowledged" in /notifications.
  *   Ignore      — this browser only. The alert stays OPEN on the server, still
  *                 counts in the bell badge, still shows as active in
- *                 /notifications where it can be acknowledged later. It just
- *                 stops popping up here. A new alert still pops.
+ *                 /notifications where it can be acknowledged later.
+ *
+ * Either way the CONDITION (pond + sensor) is not shown again in this browser
+ * session, even if the server raises a fresh alert row for it. The cards
+ * disappear the moment a button is clicked; the server round trip happens in
+ * the background and only speaks up if it fails.
  */
 export default function AlertPopup() {
 	const { alerts } = useActiveAlerts();
-	const [mounted, setMounted] = useState(false);
-	const [ignoredIds, setIgnoredIds] = useState<Set<string>>(new Set());
-	const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
-	const [bulkBusy, setBulkBusy] = useState(false);
+	// true on the client after hydration, false during SSR — without a setState
+	// in an effect. The portal must not render on the server.
+	const mounted = useSyncExternalStore(
+		() => () => {},
+		() => true,
+		() => false,
+	);
+	// Lazy initialiser: sessionStorage is read once, on the client. Nothing is
+	// rendered until mounted, so the server/client markup cannot disagree.
+	const [handled, setHandled] = useState<Set<string>>(() =>
+		typeof window === 'undefined' ? new Set() : loadHandledAlertKeys(),
+	);
 	const [error, setError] = useState<string | null>(null);
-
-	useEffect(() => {
-		setIgnoredIds(loadIgnoredAlertIds());
-		setMounted(true);
-	}, []);
-
-	// Prune ignored ids that are no longer open, so the stored set never grows
-	// unbounded and a re-triggered alert (new id) is not accidentally hidden.
-	useEffect(() => {
-		if (!alerts) return;
-		const live = new Set(alerts.map((a) => a.id));
-		setIgnoredIds((prev) => {
-			const next = new Set([...prev].filter((id) => live.has(id)));
-			if (next.size !== prev.size) saveIgnoredAlertIds(next);
-			return next;
-		});
-	}, [alerts]);
 
 	if (!mounted) return null;
 
-	const visible: ActiveAlert[] = alerts?.filter((a) => !ignoredIds.has(a.id)) ?? [];
+	const visible: ActiveAlert[] = alerts?.filter((a) => !handled.has(alertKey(a))) ?? [];
 	if (visible.length === 0) return null;
 
-	function ignore(ids: string[]) {
-		setIgnoredIds((prev) => {
+	function suppress(items: ActiveAlert[]) {
+		setHandled((prev) => {
 			const next = new Set(prev);
-			for (const id of ids) next.add(id);
-			saveIgnoredAlertIds(next);
+			for (const a of items) next.add(alertKey(a));
+			saveHandledAlertKeys(next);
 			return next;
 		});
 	}
 
-	async function onAck(id: string) {
-		setBusyIds((s) => new Set(s).add(id));
+	function unsuppress(items: ActiveAlert[]) {
+		setHandled((prev) => {
+			const next = new Set(prev);
+			for (const a of items) next.delete(alertKey(a));
+			saveHandledAlertKeys(next);
+			return next;
+		});
+	}
+
+	function onIgnore(items: ActiveAlert[]) {
 		setError(null);
-		try {
-			await acknowledgeAlert(id);
-			await refreshAlertViews();
-		} catch (err) {
-			console.error('ack_failed', err);
-			setError('Could not acknowledge — the server rejected it. Try again, or check the server log.');
-		} finally {
-			setBusyIds((s) => {
-				const n = new Set(s);
-				n.delete(id);
-				return n;
+		suppress(items);
+	}
+
+	// Optimistic: hide first, tell the server second. If the server refuses,
+	// the card comes back with the reason.
+	function onAck(items: ActiveAlert[], all: boolean) {
+		setError(null);
+		suppress(items);
+		const req = all ? acknowledgeAllAlerts() : acknowledgeAlert(items[0].id);
+		req
+			.then(() => refreshAlertViews())
+			.catch((err) => {
+				console.error('ack_failed', err);
+				unsuppress(items);
+				setError('Could not acknowledge — the server rejected it. Try again, or check the server log.');
 			});
-		}
-	}
-
-	async function onAckAll() {
-		setBulkBusy(true);
-		setError(null);
-		try {
-			await acknowledgeAllAlerts();
-			await refreshAlertViews();
-		} catch (err) {
-			console.error('ack_all_failed', err);
-			setError('Could not acknowledge — the server rejected it. Try again, or check the server log.');
-		} finally {
-			setBulkBusy(false);
-		}
-	}
-
-	function onIgnoreAll() {
-		ignore(visible.map((a) => a.id));
 	}
 
 	return createPortal(
@@ -123,25 +112,24 @@ export default function AlertPopup() {
 						<div className="flex items-center gap-2 shrink-0">
 							<button
 								type="button"
-								onClick={onIgnoreAll}
-								disabled={bulkBusy}
-								title="Hide these on this device. They stay open in Notifications."
-								className="px-3 py-1.5 rounded-lg text-[11px] font-semibold text-slate-300 bg-white/5 hover:bg-white/10 border border-[var(--border)] transition-colors disabled:opacity-50">
+								onClick={() => onIgnore(visible)}
+								title="Hide these for this session. They stay open in Notifications."
+								className="px-3 py-1.5 rounded-lg text-[11px] font-semibold text-slate-300 bg-white/5 hover:bg-white/10 border border-[var(--border)] transition-colors">
 								Ignore all
 							</button>
 							<button
 								type="button"
-								onClick={onAckAll}
-								disabled={bulkBusy}
+								onClick={() => onAck(visible, true)}
 								title="Mark every alert as handled."
-								className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/40 text-rose-200 transition-colors disabled:opacity-50">
-								{bulkBusy ? 'Acknowledging…' : 'Acknowledge all'}
+								className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/40 text-rose-200 transition-colors">
+								Acknowledge all
 							</button>
 						</div>
 					</div>
 					<p className="mt-2 text-[10px] text-slate-500 leading-snug">
-						<span className="text-slate-400">Ignore</span> hides an alert on this device only — it stays
+						<span className="text-slate-400">Ignore</span> hides an alert for this session — it stays
 						active in Notifications. <span className="text-slate-400">Acknowledge</span> marks it handled.
+						Neither shows the same pond and sensor again until you close this tab.
 					</p>
 					{error && (
 						<p className="mt-2 text-[11px] text-rose-300 leading-snug" role="alert">
@@ -151,16 +139,10 @@ export default function AlertPopup() {
 				</div>
 				<div className="p-4 space-y-3">
 					{visible.map((a) => {
-						const meta = SENSOR_LABELS[a.sensor] ?? {
-							name: a.sensor,
-							unit: '',
-						};
+						const meta = SENSOR_LABELS[a.sensor] ?? { name: a.sensor, unit: '' };
 						const isConnectivity = a.sensor === 'connectivity';
-						const busy = busyIds.has(a.id) || bulkBusy;
 						return (
-							<div
-								key={a.id}
-								className="rounded-xl border border-rose-500/30 bg-rose-500/5 p-4">
+							<div key={a.id} className="rounded-xl border border-rose-500/30 bg-rose-500/5 p-4">
 								<p className="font-semibold text-white">
 									⚠️ {a.pondName} — {isConnectivity ? 'No Data Received' : `${meta.name} Alert`}
 								</p>
@@ -179,7 +161,7 @@ export default function AlertPopup() {
 								) : (
 									<>
 										<p className="text-sm text-slate-300 mt-1">
-											{a.consecutiveCount} consecutive readings out of range (~1h 45m of abnormal data)
+											Out of range for the last {a.consecutiveCount} readings (30+ minutes)
 										</p>
 										<p className="text-sm text-slate-400 mt-1 text-mono">
 											Current: {fmt(a.lastValue)}
@@ -194,17 +176,15 @@ export default function AlertPopup() {
 								<div className="mt-3 flex gap-2">
 									<button
 										type="button"
-										onClick={() => ignore([a.id])}
-										disabled={busy}
-										className="flex-1 px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-[var(--border)] text-slate-300 text-sm font-semibold transition-colors disabled:opacity-50">
+										onClick={() => onIgnore([a])}
+										className="flex-1 px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-[var(--border)] text-slate-300 text-sm font-semibold transition-colors">
 										Ignore
 									</button>
 									<button
 										type="button"
-										onClick={() => onAck(a.id)}
-										disabled={busy}
-										className="flex-[2] px-4 py-2 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/40 text-rose-200 text-sm font-semibold transition-colors disabled:opacity-50">
-										{busyIds.has(a.id) ? 'Acknowledging…' : 'Acknowledge'}
+										onClick={() => onAck([a], false)}
+										className="flex-[2] px-4 py-2 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/40 text-rose-200 text-sm font-semibold transition-colors">
+										Acknowledge
 									</button>
 								</div>
 							</div>
