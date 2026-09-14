@@ -542,7 +542,9 @@ This app builds in **standalone** mode, which does not include images,
 stylesheets or fonts in the output. If you skip this the dashboard loads as
 unstyled black-and-white text with no logo.
 
-**You must repeat this after every single build.**
+**You must repeat this after every single build.** From now on you can let
+`./scripts/deploy.sh` do 7.3 and 7.4 together (it also restarts the app once
+the service in section 8 exists).
 
 ### 7.5 Test it once by hand
 
@@ -951,25 +953,38 @@ Do this once, then use the normal update steps below.
 ### Updating to a new version
 
 ```bash
-cd /home/pi/ipond-local
-git pull
 cd $APP_DIR
-npm install
-npm run build
-cp -r public .next/standalone/            # ⚠️ do not skip
-cp -r .next/static .next/standalone/.next/ # ⚠️ do not skip
-sudo systemctl restart ipond
+git pull
+./db/run_remaining.sh 017      # apply new migrations FIRST (safe to re-run)
+docker compose up -d                       # only needed if docker-compose.yml changed
+./scripts/deploy.sh                        # build, copy static files, restart
 ```
 
-If the update notes mention a new database migration:
+`deploy.sh` does the build, the two copy steps from 7.4, and the restart. It
+prints the newest migration number at the end — if you have not applied that
+one, run `run_remaining.sh` with that number and deploy again.
+
+Apply migrations **before** deploying: the app expects the tables and views
+they create.
+
+### If this Pi was set up before September 14, 2026 — performance update
+
+The dashboard was slow because every chart re-read every raw sensor reading on
+every refresh. This update adds a pre-computed 15-minute summary table, turns
+on compression for old data, and tunes the database for the Pi. Three one-time
+steps, in this order:
 
 ```bash
 cd $APP_DIR
-docker exec -i ipond-timescaledb \
-  psql -U soletronix -d ipond < db/migrations/0XX_name.sql
+git pull
+docker compose up -d                  # recreates the database container with the tuned settings
+./db/run_remaining.sh 017  # builds the summary table — allow a few minutes on a big DB
+./scripts/deploy.sh                   # rebuild and restart the app
 ```
 
-Apply migrations **before** restarting the service.
+> **You should see** after the migration: `ALL MIGRATIONS COMPLETE`, and
+> `docker exec ipond-timescaledb psql -U soletronix -d ipond -c "SELECT count(*) FROM sensor_readings_15m"`
+> returns a number greater than zero.
 
 ### Backing up the database
 

@@ -136,15 +136,16 @@ Local appliance, cron every 5min
 
 ## Database Tables
 
-- `sensor_readings` — hypertable, partitioned by `time` (TIMESTAMPTZ). Columns: `pond_id`, `temperature`, `ph`, `salinity`, `dissolved_oxygen`, `synced_at`, `source` (016). **No `id` column** — a row is identified by `(pond_id, time)`, which migration 016 made UNIQUE.
+- `sensor_readings` — hypertable, partitioned by `time` (TIMESTAMPTZ). Columns: `pond_id`, `temperature`, `ph`, `salinity`, `dissolved_oxygen`, `synced_at`, `source` (016). **No `id` column** — a row is identified by `(pond_id, time)`, which migration 016 made UNIQUE. Compressed after 30 days (018, `segmentby pond_id`); rows in compressed chunks can still be read, upserted and updated (the sync worker's `synced_at` mark works there, just slower). **Never pruned.**
+- `sensor_readings_15m` — **continuous aggregate** (017) over `sensor_readings`: per pond per 15-minute bucket, `n` plus `<sensor>_sum / _cnt / _min / _max` for each of the four sensors. Real-time aggregation is on (`materialized_only = false`), so the bucket still filling is computed from raw rows. Refresh policy every 5 min. **Every chart query reads this, never raw** — see `@/lib/rollup` for the SQL fragments and the anomaly-count semantics. The one exception is Today for a single pond, which is 1-minute averages straight from raw (fine: one pond, one day, index scan).
 - `owners` — retained for FK targets only (`getOperatorId()` reads the first row). No login, no roles enforced. Subscription columns dropped in migration 015.
 - `ponds` — pond metadata, `pond_code` `PND-001`..`PND-010`, `name`. **Fresh installs must seed `db/seeds/002_local_appliance.sql`** — migrations create empty tables, and the old `001_seed.sql` dies on `ponds_owner_id_fkey` (it references two tenant owners it never creates), leaving zero ponds and every ingest failing `unknown_pond`.
 - `user_pond_access` — **dead table**. Still in the schema, never read or written by the app.
 - `pond_sensor_thresholds` — per-pond optimal range per sensor: `optimal_min`, `optimal_max`, `optimal_value` (target, display-only, migration 012).
 - `pond_sensor_thresholds_audit` — threshold change history: `old_value`, `new_value`.
-- `ingestion_logs` — every ESP32 POST (success + error).
+- `ingestion_logs` — every ESP32 POST (success + error). Pruned after 30 days by the `ipond_prune_logs` TimescaleDB job (017).
 - `sensor_alerts` — out-of-range alert events. `sensor` allows `temperature/ph/salinity/dissolved_oxygen/connectivity` (migration 014). Fields: `triggered_at`, `consecutive_count`, `last_value`, `optimal_min`, `optimal_max`, `acknowledged_at`, `resolved_at`.
-- `pond_status_log` — heartbeat rows written on every ingest (`status='online'`); utilization derives stale/offline from row gaps.
+- `pond_status_log` — heartbeat rows written by ingest (`status='online'`), **at most one per pond per 60 s** — the gateway posts every few seconds and /utilization's finest distinction is a 20-minute gap, so per-reading rows were 60x the writes for no information. Utilization derives stale/offline from row gaps. Pruned after 120 days (017).
 - `maintenance_requests` — owner → admin maintenance tickets.
 - (notifications wiring via migration 008.)
 
@@ -245,7 +246,10 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - Never open port 5432 to the internet.
 - Pond status always via shared `getPondStatus()` (`@/lib/pondStatus`) — never duplicate.
 - Alert detection: background worker ONLY — never in ingestion route.
-- Status logging: `pond_status_log` written on every ingest — never via dashboard polling.
+- Status logging: `pond_status_log` written by the ingest route only (throttled to one row per pond per minute) — never via dashboard polling.
+- Chart queries (`/api/readings`, `/api/readings/compare`) read `sensor_readings_15m`, never raw `sensor_readings`. Raw scans over a range of per-second readings were what made the Pi "very slow". Only Today-for-one-pond reads raw (1-minute buckets).
+- When grouping over the rollup, `GROUP BY` must be **positional** (`GROUP BY 1`). The view has a column named `bucket`; an output alias with the same name loses to it, and the query silently groups at 15 minutes for every range.
+- Ingest is one transaction with `SET LOCAL synchronous_commit TO off`. Never split it back into autocommit statements — each one is a WAL fsync on USB flash, and readers on the shared pool queue behind them.
 - No client timestamps — server stamps `time = NOW()` always.
 - uPlot destroy + recreate on range change — never update in place.
 - Default chart range: Today.
@@ -257,12 +261,13 @@ All pages are open — no session, no role gate. The license gate wraps them all
 
 ## Chart Behavior
 
-- **Today**: raw data, no bucket, HH:mm x-axis, no rotation
+- **Today**: single pond — 1-minute averages from raw (`mode: "raw"` payload, <= 1440 points; `since` re-sends the last bucket and the client replaces it). Several ponds — 15-minute average across them from the rollup. HH:mm x-axis, no rotation
 - **7d**: 1h bucket, -30° rotation
 - **14d**: 3h bucket, -30° rotation
 - **30d**: 6h bucket, -30° rotation
 - **Health status**: Normal / Warning / Critical based on % outside optimal range
 - **Tooltip**: Time, AVG, MIN, MAX, Anomaly count, Health status
+- **Anomaly count** is at 15-minute resolution: a 15-minute bucket whose *average* is out of range contributes all of its readings. That is the same rule the health colour uses, so the two always agree. A lone spike inside a normal quarter hour is not counted.
 - **Compare mode**: overlapping lines per pond, unique colors array defined in constants
 
 ## Alert System
@@ -283,8 +288,9 @@ All pages are open — no session, no role gate. The license gate wraps them all
 2. `public/` and `.next/static/` are **not** copied into the bundle. Must `cp -r` both after every build or the app serves unstyled HTML.
 3. `server.js` **chdirs to its own directory**, so `process.cwd()` is `.next/standalone`. `LICENSE_PATH` must be **absolute** or the license reads as `missing` and the app bricks itself. The build also copies `.env` into `.next/standalone/.env`, so editing the project `.env` post-build does nothing — pass config via systemd `EnvironmentFile`, which takes precedence.
 
-- **Deploy**: `git pull && npm install && npm run build && cp -r public .next/standalone/ && cp -r .next/static .next/standalone/.next/ && sudo systemctl restart ipond`
-- **Migration**: `docker exec -i ipond-timescaledb psql -U soletronix -d ipond < db/migrations/XXX.sql`, or `./db/migrations/run_remaining.sh 0NN` to apply from a number onward.
+- **Deploy**: `./scripts/deploy.sh [--pull]` — build, copy `public/` + `.next/static/` + `.env` + `license.json` into the bundle, restart (systemd `ipond` if present, else PM2 `ipond-local`). Prints the newest migration number so nobody forgets to apply it.
+- **Postgres tuning lives in `docker-compose.yml` `command:`** — 1 GB shared_buffers, `synchronous_commit=off`, 15-min checkpoints, `max_wal_size=2GB`, `wal_compression=on`, `random_page_cost=1.1`, `log_checkpoints=on`. The image's own timescaledb-tune step lives in `/docker-entrypoint-initdb.d`, which our migrations mount replaces, so without this block the DB runs stock defaults (128 MB shared_buffers, fsync every commit). A config change needs `docker compose up -d` (recreate; data is a bind mount, untouched). `synchronous_commit=off` means a power cut can lose the last ~0.6 s of writes — accepted for telemetry.
+- **Migration**: `docker exec -i ipond-timescaledb psql -U soletronix -d ipond < db/migrations/XXX.sql`, or `./db/run_remaining.sh 0NN` to apply from a number onward.
 - **Compose**: one file, `i-pond-frontend/docker-compose.yml` — container `ipond-timescaledb`, db `ipond`, data bind-mounted at `DB_DATA_PATH`, password from `.env`, port bound to `127.0.0.1` only. Run it from the app directory so `.env` is picked up.
 - **Serial listener**: systemd unit `ipond-serial`, `After=ipond.service`, `Restart=always`. The listener **exits on port close** on purpose so systemd re-opens the port when the cable comes back. `pi` must be in `dialout`.
 - Never commit `.env`. Never commit `.next` folder.
@@ -294,7 +300,7 @@ All pages are open — no session, no role gate. The license gate wraps them all
 
 - Env vars in `.env` — never commit.
 - Migrations in `/db/migrations/` — numbered, idempotent where possible.
-- DB pool: `@/lib/db` (singleton, `max: 5`); worker uses its own pool (`max: 3`).
+- DB pool: `@/lib/db` (singleton, `max: 8`); worker uses its own pool (`max: 3`).
 - No auth guards anywhere. Writes stamp `getOperatorId()` from `@/lib/operator`.
 - License: `@/lib/license`.
 - Ingestion auth: Bearer token from `API_TOKEN` env var.
@@ -321,6 +327,11 @@ All pages are open — no session, no role gate. The license gate wraps them all
 - Never pass a query parameter the SQL does not reference — Postgres cannot infer its type (`could not determine data type of parameter $N`).
 - Never insert a `sensor_alerts` row without a `NOT EXISTS (... acknowledged_at IS NULL)` guard — there is no unique index to catch duplicates.
 - Never change the firmware's receive path — copy it from `old_code_working.ino` and only touch `sendToPi()`.
+- Never add a chart query that scans raw `sensor_readings` over a multi-day range — go through `sensor_readings_15m`.
+- Never `GROUP BY bucket` on the rollup — positional only (see Key Rules).
+- Never poll both dashboard view modes at once — pass `active` to `useMultiPondReadings` / `useCompareReadings`.
+- Never delete from `sensor_readings` in a retention job — compression (018) handles disk growth; the rows are the record and cloud sync reads them.
+- Never put a `*.sh` (or anything but numbered `*.sql`) in `db/migrations/` — it is the Postgres init directory and the entrypoint executes shell scripts it finds there. `run_remaining.sh` lives in `db/` for this reason.
 - Never reintroduce Vercel config (`vercel.json`, `NEXTAUTH_URL`, `AUTH_SECRET`) — this is a self-hosted Pi build.
 - Never ship a standalone build without copying `public/` and `.next/static/`.
 - Never seed a fresh appliance with `001_seed.sql` — use `002_local_appliance.sql`.

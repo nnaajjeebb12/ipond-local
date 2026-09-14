@@ -256,21 +256,47 @@ and POSTs them to the local ingest route; it exits on port close so
 ### Redeploying
 
 ```bash
-cd /home/pi/ipond-local
-git pull
-npm install
-npm run build
-cp -r public .next/standalone/
-cp -r .next/static .next/standalone/.next/
-sudo systemctl restart ipond
+cd /home/pi/ipond-local/i-pond-frontend
+./scripts/deploy.sh --pull        # git pull, npm install, build, copy assets, restart
 ```
 
-Apply any new migrations first:
+The script restarts whichever runner exists — the systemd unit `ipond`, or the
+PM2 process `ipond-local` — and prints the newest migration number. Apply
+migrations **before** running it:
 
 ```bash
-docker exec -i ipond-timescaledb psql -U soletronix -d ipond \
-  < db/migrations/0XX_name.sql
+./db/run_remaining.sh 017        # from 017 onward; each file is idempotent
 ```
+
+If `docker-compose.yml` changed (Postgres tuning lives in its `command:` block),
+recreate the container too — the data is a bind mount and is untouched:
+
+```bash
+docker compose up -d
+```
+
+### Database performance notes
+
+The gateway posts a reading every few seconds, so `sensor_readings` grows by
+tens of thousands of rows per pond per day. Three things keep the dashboard fast
+on a Pi:
+
+- **`sensor_readings_15m`** (migration 017) — a TimescaleDB continuous
+  aggregate. Every chart reads this 15-minute rollup, not raw rows. It refreshes
+  itself every 5 minutes and the current bucket is computed live.
+- **Compression** (migration 018) — chunks older than 30 days are compressed
+  10–20x. Nothing is deleted.
+- **`docker-compose.yml` tuning** — the image's first-boot `timescaledb-tune`
+  step is hidden by our migrations mount (same directory), so without the
+  `command:` block it runs stock defaults: 128 MB `shared_buffers` and an fsync
+  on every commit.
+  The `command:` block sets sane values for an 8 GB Pi on USB flash, including
+  `synchronous_commit=off` (a power cut can lose the last ~0.6 s of readings).
+
+`docker logs ipond-timescaledb | grep checkpoint` shows checkpoint timing.
+Note that `write=` is the *paced* duration (Postgres deliberately spreads a
+checkpoint over 90 % of `checkpoint_timeout`); `sync=` is the number that
+reflects disk latency.
 
 ### Checks
 

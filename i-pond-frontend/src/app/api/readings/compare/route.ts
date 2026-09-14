@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { pool } from "@/lib/db";
+import { ROLLUP_VIEW, rollupAnomalyCount, rollupAvg, rollupMax, rollupMin } from "@/lib/rollup";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -76,37 +77,42 @@ export async function GET(req: NextRequest) {
 
     const useToday = rangeParam === "today";
 
-    const sql = useToday
-      ? `SELECT sr.pond_id AS pond_id,
-                (time_bucket($1::interval, sr.time AT TIME ZONE $3) AT TIME ZONE $3) AS bucket,
-                ROUND(AVG(sr.${column})::numeric, 2)::float8 AS avg,
-                ROUND(MIN(sr.${column})::numeric, 2)::float8 AS min,
-                ROUND(MAX(sr.${column})::numeric, 2)::float8 AS max
-           FROM sensor_readings sr
-          WHERE sr.pond_id = ANY($2::int[])
-            AND sr.time >= date_trunc('day', NOW() AT TIME ZONE $3) AT TIME ZONE $3
-          GROUP BY sr.pond_id, bucket
-          ORDER BY sr.pond_id, bucket ASC`
-      : `SELECT sr.pond_id AS pond_id,
-                (time_bucket($1::interval, sr.time AT TIME ZONE $4) AT TIME ZONE $4) AS bucket,
-                ROUND(AVG(sr.${column})::numeric, 2)::float8 AS avg,
-                ROUND(MIN(sr.${column})::numeric, 2)::float8 AS min,
-                ROUND(MAX(sr.${column})::numeric, 2)::float8 AS max,
-                COUNT(*) FILTER (
-                  WHERE sr.${column} < pst.optimal_min
-                     OR sr.${column} > pst.optimal_max
-                ) AS anomaly_count
-           FROM sensor_readings sr
-           LEFT JOIN pond_sensor_thresholds pst
-             ON pst.pond_id = sr.pond_id AND pst.sensor = $5
-          WHERE sr.pond_id = ANY($2::int[])
-            AND sr.time >= NOW() - $3::interval
-          GROUP BY sr.pond_id, bucket, pst.optimal_min, pst.optimal_max
-          ORDER BY sr.pond_id, bucket ASC`;
-
+    // Both read the 15-minute rollup (migration 017), never raw rows: this is
+    // polled every 10 s for four sensors, and a raw GROUP BY over a day of
+    // per-second readings for every pond was the single biggest load on the Pi.
+    //
     // The "today" query never references $3, and Postgres cannot infer the type
     // of a parameter that appears nowhere in the statement: it fails with
     // "could not determine data type of parameter $3". Pass only what is used.
+    //
+    // GROUP BY is positional on purpose: the rollup has its own column named
+    // `bucket`, and Postgres resolves an ambiguous GROUP BY name to the INPUT
+    // column — which would silently group at 15 minutes for every range.
+    const sql = useToday
+      ? `SELECT a.pond_id AS pond_id,
+                (time_bucket($1::interval, a.bucket AT TIME ZONE $3) AT TIME ZONE $3) AS bucket,
+                ${rollupAvg("a", column)} AS avg,
+                ${rollupMin("a", column)} AS min,
+                ${rollupMax("a", column)} AS max
+           FROM ${ROLLUP_VIEW} a
+          WHERE a.pond_id = ANY($2::int[])
+            AND a.bucket >= date_trunc('day', NOW() AT TIME ZONE $3) AT TIME ZONE $3
+          GROUP BY 1, 2
+          ORDER BY 1, 2 ASC`
+      : `SELECT a.pond_id AS pond_id,
+                (time_bucket($1::interval, a.bucket AT TIME ZONE $4) AT TIME ZONE $4) AS bucket,
+                ${rollupAvg("a", column)} AS avg,
+                ${rollupMin("a", column)} AS min,
+                ${rollupMax("a", column)} AS max,
+                ${rollupAnomalyCount("a", column)} AS anomaly_count
+           FROM ${ROLLUP_VIEW} a
+           LEFT JOIN pond_sensor_thresholds pst
+             ON pst.pond_id = a.pond_id AND pst.sensor = $5
+          WHERE a.pond_id = ANY($2::int[])
+            AND a.bucket >= NOW() - $3::interval
+          GROUP BY 1, 2
+          ORDER BY 1, 2 ASC`;
+
     const params = useToday
       ? [cfg.bucket, pondIds, TZ]
       : [cfg.bucket, pondIds, cfg.interval, TZ, column];

@@ -1,5 +1,36 @@
 # Changelog
 
+## [2026-09-14] — Dashboard performance on the Pi: rollups, compression, fsync-free ingest
+
+### Changed
+- **Root cause of the "very slow" dashboard found and measured.** The gateway posts a reading every few seconds, and every dashboard chart was a `GROUP BY` over every raw row in its range, polled every 10 s, for four sensors, in **both** view modes at once (the page called `useMultiPondReadings` and `useCompareReadings` unconditionally — 8 queries per tick, 4 of which were never shown). With just 3 days x 3 ponds at 1 Hz (777k rows) on a desktop, compare-today took **363 ms** and 7d **483 ms** per query — ~3.4 s of DB time per 10-second tick before any Pi slowdown factor. The Pi was permanently saturated and grew slower every day.
+- **Migration 017 — continuous aggregate `sensor_readings_15m`.** Per pond, per 15 minutes: `n`, and `sum/cnt/min/max` per sensor. Sum+count (not avg) so 1 h / 3 h / 6 h / 1 day buckets re-aggregate exactly. Real-time aggregation on; refresh policy every 5 min. Applied in ~1 s over 777k rows. Same queries now: **10 ms and 3 ms**, 0 mismatched buckets against the raw query over 73 hourly buckets (avg to 4 dp, min, max, count).
+- **Migration 018 — compression** of `sensor_readings` chunks older than 30 days (`segmentby pond_id`, `orderby time DESC`). Test chunk: 3.9 MB -> 224 kB. Verified the sync worker's `UPDATE ... synced_at` works on compressed rows, the unique index still rejects duplicates, and the partial `unsynced` index still sees them.
+- **`/api/readings` and `/api/readings/compare` read the rollup** for every range except Today-single-pond. Today-single-pond is now **1-minute averages** from raw (<= 1440 points) instead of raw rows with `LIMIT 5000` — at 1 Hz the old query silently stopped at ~01:20 and uPlot was asked to draw tens of thousands of points. The `since` incremental poll re-sends the last (still filling) bucket and `useReadings` replaces it instead of appending a duplicate x. New `@/lib/rollup` holds the SQL fragments.
+- **Anomaly count semantics changed** (disclosed, not hidden): it is now counted at 15-minute resolution — a 15-minute bucket whose average is out of range contributes all its readings. This is the rule the health colour already used, so the tooltip's count and colour now always agree; a single spike inside a normal quarter hour is no longer counted.
+- **Dashboard polls only the visible view mode** — `active` flag on both hooks; the parked set keeps its cache. `/api/ponds` polled every 60 s instead of 10 s. Pool `max` 5 -> 8.
+- **Ingest is one transaction, `SET LOCAL synchronous_commit TO off`.** Was three autocommit INSERTs, i.e. three WAL fsyncs on USB flash per reading, with every dashboard query queuing behind them on the shared pool. Heartbeat rows (`pond_status_log`) throttled to one per pond per 60 s — /utilization's finest distinction is a 20-minute gap, so per-reading heartbeats were 60x the writes for zero information. Verified: 3 POSTs -> 3 readings, 1 heartbeat, 3 log rows; failures still logged.
+- **Postgres tuned in `docker-compose.yml`** — confirmed on the dev container: 128 MB shared_buffers, 5-min checkpoints, sync commit on, `random_page_cost=4`. The image *would* run timescaledb-tune on first boot, but that script sits in `/docker-entrypoint-initdb.d`, the directory our migrations mount replaces — so every appliance built from this compose file has been running stock defaults. Now: 1 GB shared_buffers, 3 GB effective_cache_size, `synchronous_commit=off`, 15-min checkpoints, `max_wal_size=2GB`, `wal_compression=on`, `random_page_cost=1.1`, `log_checkpoints=on`. Flags verified to boot on a throwaway container.
+- **Log retention** — `ipond_prune_logs` daily job (017): `ingestion_logs` 30 days, `pond_status_log` 120 days. `sensor_readings` is never pruned.
+- **`scripts/deploy.sh`** — build + copy `public/`, `.next/static/`, `.env`, `license.json` into the bundle + restart via systemd `ipond` or PM2 `ipond-local`, whichever exists. Prints the newest migration number.
+- **First-boot bug fixed: `run_remaining.sh` moved from `db/migrations/` to `db/`.** The Postgres entrypoint executes every `*.sh` in the init directory. Found while testing a fresh container: all 18 migrations ran, then the entrypoint ran `run_remaining.sh`, which died on "no .env" and aborted initialisation — the container exited. Under compose's `restart: unless-stopped` it came back (PGDATA already initialised, migrations already applied), so a fresh Pi would have "worked" after one silent crash; under plain `docker run` it stayed dead. Fresh-boot test now: container up, 0 SQL errors, seed OK, rollup + 3 jobs + compression present.
+
+### Files Modified
+- db/migrations/017_continuous_aggregate.sql *(new)*, db/migrations/018_compression.sql *(new)*
+- docker-compose.yml
+- src/app/api/send-sensor-data/route.ts
+- src/app/api/readings/route.ts, src/app/api/readings/compare/route.ts, src/lib/rollup.ts *(new)*
+- src/hooks/useApi.ts, src/app/dashboard/page.tsx, src/lib/db.ts
+- scripts/deploy.sh *(new)*, db/run_remaining.sh *(moved from db/migrations/)*
+- CLAUDE.md, README.md, docs/Pi-Deployment-Checklist.md
+
+### Notes
+- **The 268-second checkpoint in the Pi notes is not evidence of a slow drive.** Postgres spreads checkpoint writes over `checkpoint_completion_target x checkpoint_timeout` = 0.9 x 300 s ~ 270 s *by design*; `write=268s` for 600 buffers is the checkpointer pacing itself. The `sync=` figure is the one that shows fsync latency. The flash may still be slow, and the tuning above helps either way, but the slowness was the queries.
+- **Caught during verification:** the first rollup version returned 289 buckets for every range — `GROUP BY bucket` resolved to the view's own `bucket` column, not the output alias. Postgres prefers input columns for GROUP BY and output columns for ORDER BY, so the result was sorted and plausible-looking but at 15-minute resolution. Now positional; rule added to CLAUDE.md.
+- **Existing Pi needs three one-time steps after `git pull`:** `docker compose up -d` (picks up the tuned config), `./db/run_remaining.sh 017`, then `./scripts/deploy.sh`. Order matters: 017 must exist before the new app starts or every chart 500s on a missing view.
+- **Not tested in a browser this time:** the dev `license.json` no longer verifies against the production key embedded in f73924d, so the layout gate blocks every page locally. API payload shapes are unchanged and `tsc` is clean.
+- **Flagged, not changed:** the reports page's raw export (`/api/readings/raw` `LIMIT 50000`, `/api/readings/all` `LIMIT 100000`) silently truncates at per-second cadence — 50k rows is ~14 hours — and the page never shows the `truncated` flag. A per-reading PDF of a week is not viable at this cadence anyway; the export should probably move to 1-minute averages from the rollup. Also the popup's "(~1h 45m of abnormal data)" text assumes 15-minute readings; 7 consecutive readings is now under a minute.
+
 ## [2026-09-14] — Fix: Acknowledge did nothing on a database with no owner row
 
 ### Changed

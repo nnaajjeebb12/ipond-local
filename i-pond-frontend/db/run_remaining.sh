@@ -7,12 +7,17 @@
 # the database was created without the mount.
 #
 #   cd i-pond-frontend
-#   ./db/migrations/run_remaining.sh 015          # apply 015 and everything after
-#   ./db/migrations/run_remaining.sh              # apply ALL (each file is idempotent)
+#   ./db/run_remaining.sh 015          # apply 015 and everything after
+#   ./db/run_remaining.sh              # apply ALL (each file is idempotent)
 #
 # Reads POSTGRES_USER / POSTGRES_DB from ./.env so it matches docker-compose.yml.
+#
+# Lives in db/, NOT db/migrations/: that folder is mounted as the Postgres init
+# directory, and the entrypoint executes every *.sh it finds there. With this
+# script inside it, a fresh container ran the migrations, then ran this, which
+# died on "no .env" and took first-boot initialisation down with it.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/migrations"
 
 ENV_FILE="../../.env"
 [ -f "$ENV_FILE" ] || { echo "no .env at $ENV_FILE"; exit 1; }

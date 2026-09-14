@@ -11,6 +11,15 @@
 # db/migrations is mounted as the init directory: on the FIRST start with an
 # empty data directory, Postgres runs every *.sql in it, in name order. It is
 # never re-run after that — apply later migrations by hand (see README).
+#
+# The `command:` block tunes Postgres for this box: a Raspberry Pi 4 (8 GB)
+# writing telemetry to consumer USB flash. The image would normally run
+# timescaledb-tune on first boot, but that script lives in
+# /docker-entrypoint-initdb.d — the directory our migrations mount REPLACES —
+# so without this block the database runs stock Postgres defaults (128 MB
+# shared_buffers, 5-minute checkpoints, fsync on every commit). Changing
+# these needs `docker compose up -d` again (recreates the container; data is
+# untouched).
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg16
@@ -25,3 +34,37 @@ services:
     volumes:
       - ${DB_DATA_PATH:-./data/timescaledb}:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    command:
+      - postgres
+      # --- memory: the Pi has 8 GB and nothing else heavy runs on it ---
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=3GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      # --- writes: USB flash hates many small fsyncs; batch them ---
+      # synchronous_commit=off: a commit returns before its WAL hits the disk.
+      # On sudden power loss up to ~0.6 s of the newest readings can be lost.
+      # For sensor telemetry that is an acceptable trade for not blocking every
+      # insert (and the readers queued behind it) on a slow flash fsync.
+      - -c
+      - synchronous_commit=off
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - max_wal_size=2GB
+      - -c
+      - min_wal_size=256MB
+      - -c
+      - wal_compression=on
+      # --- planner: flash has no seek penalty ---
+      - -c
+      - random_page_cost=1.1
+      # --- visibility: `docker logs ipond-timescaledb` shows checkpoint timing ---
+      - -c
+      - log_checkpoints=on

@@ -76,10 +76,12 @@ export function unitFor(sensorType: string): string {
 }
 
 export function usePonds() {
+	// Ten rows that change when someone renames a pond. Not worth a query
+	// every 10 s from every open tab on a Pi.
 	const { data, error, isLoading } = useSWR<PondWithOwner[]>(
 		'/api/ponds',
 		jsonFetcher,
-		swrConfig
+		{ ...swrConfig, refreshInterval: 60_000 }
 	);
 	return { ponds: data, isLoading, error };
 }
@@ -162,8 +164,16 @@ export function useReadings(
 					if (ts !== null) setLastTimestamp(ts);
 				}, 0);
 			} else if (data.data.length > 0) {
+				// The server re-sends the bucket at `since` because it may still
+				// be filling — drop our copy of it (and anything after) before
+				// appending, so a bucket is never plotted twice.
+				const firstNew = data.data[0].time;
 				setTimeout(() => {
-					setTodayBuffer((prev) => [...prev, ...data.data]);
+					setTodayBuffer((prev) => {
+						let cut = prev.length;
+						while (cut > 0 && prev[cut - 1].time >= firstNew) cut--;
+						return [...prev.slice(0, cut), ...data.data];
+					});
 					setLastTimestamp(data.data[data.data.length - 1].time);
 				}, 0);
 			}
@@ -328,15 +338,22 @@ export function useAllPondsReadings(sensorType: string, range: Range = '7d') {
 	return { payload, readings, isLoading, error };
 }
 
+/**
+ * `active` — pass false while this series is not on screen (e.g. the other
+ * view mode is selected). The hook keeps its cached data but stops polling;
+ * the dashboard would otherwise fetch both view modes for every sensor every
+ * 10 s, twice the queries it can ever show.
+ */
 export function useMultiPondReadings(
 	sensorType: string,
 	range: Range,
 	pondIds: string[] | 'all',
+	active: boolean = true,
 ) {
 	const param = SENSOR_PARAM[sensorType];
 	const visible = useTabVisible();
 	const pondsKey = pondIds === 'all' ? 'all' : [...pondIds].sort().join(',');
-	const enabled = !!param && (pondIds === 'all' || pondIds.length > 0);
+	const enabled = active && !!param && (pondIds === 'all' || pondIds.length > 0);
 	const url = enabled
 		? `/api/readings?sensor=${param}&range=${range}&ponds=${encodeURIComponent(pondsKey)}`
 		: null;
@@ -358,15 +375,17 @@ export type CompareReadingsPayload = {
 	series: ComparePondSeries[];
 };
 
+/** See useMultiPondReadings for `active`. */
 export function useCompareReadings(
 	sensorType: string,
 	range: Range,
 	pondIds: string[] | 'all',
+	active: boolean = true,
 ) {
 	const param = SENSOR_PARAM[sensorType];
 	const visible = useTabVisible();
 	const pondsKey = pondIds === 'all' ? 'all' : [...pondIds].sort().join(',');
-	const enabled = !!param && (pondIds === 'all' || pondIds.length > 0);
+	const enabled = active && !!param && (pondIds === 'all' || pondIds.length > 0);
 	const url = enabled
 		? `/api/readings/compare?sensor=${param}&range=${range}&ponds=${encodeURIComponent(pondsKey)}`
 		: null;

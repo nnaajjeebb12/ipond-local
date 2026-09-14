@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { pool } from "@/lib/db";
+import { ROLLUP_VIEW, rollupAnomalyCount, rollupAvg, rollupMax, rollupMin } from "@/lib/rollup";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -107,50 +108,55 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    // ---------- TODAY (raw) ----------
+    // ---------- TODAY ----------
     if (rangeParam === "today") {
       if (pondId !== null) {
+        // Single pond: 1-minute averages straight from raw rows (<= 1440
+        // points). The gateway sends a reading every few seconds, so a true
+        // raw day is tens of thousands of points — too many for the browser
+        // and, with LIMIT 5000, the old raw query stopped at ~01:20.
+        //
+        // Incremental polls pass `since` = the last bucket the client has.
+        // That bucket is re-sent (it may still be filling) and the client
+        // replaces it — see useReadings.
         const useSince = sinceMs !== null;
         const sql = useSince
-          ? `SELECT time, ROUND(${column}::numeric, 2)::float8 AS value
+          ? `SELECT time_bucket('1 minute', time) AS bucket,
+                    ROUND(AVG(${column})::numeric, 2)::float8 AS value
                FROM sensor_readings
               WHERE pond_id = $1
-                AND time > to_timestamp($2 / 1000.0)
-              ORDER BY time ASC
+                AND time >= time_bucket('1 minute', to_timestamp($2 / 1000.0))
+              GROUP BY bucket
+              ORDER BY bucket ASC
               LIMIT 5000`
-          : `SELECT time, ROUND(${column}::numeric, 2)::float8 AS value
+          : `SELECT time_bucket('1 minute', time) AS bucket,
+                    ROUND(AVG(${column})::numeric, 2)::float8 AS value
                FROM sensor_readings
               WHERE pond_id = $1
                 AND time >= date_trunc('day', NOW() AT TIME ZONE $2) AT TIME ZONE $2
-              ORDER BY time ASC
+              GROUP BY bucket
+              ORDER BY bucket ASC
               LIMIT 5000`;
         const params = useSince ? [pondId, sinceMs] : [pondId, TZ];
-        const { rows } = await pool.query<{ time: Date; value: number | null }>(sql, params);
+        const { rows } = await pool.query<{ bucket: Date; value: number | null }>(sql, params);
         return NextResponse.json({
           mode: "raw",
           data: rows
             .filter((r) => r.value !== null)
-            .map((r) => ({ time: r.time.getTime(), value: r.value as number })),
+            .map((r) => ({ time: r.bucket.getTime(), value: r.value as number })),
         });
       }
 
+      // Several ponds: 15-minute average across them, from the rollup.
       const idsFilter = pondIds ?? null;
-      const sql = idsFilter
-        ? `SELECT (time_bucket('15 minutes', sr.time AT TIME ZONE $1) AT TIME ZONE $1) AS bucket,
-                  ROUND(AVG(sr.${column})::numeric, 2)::float8 AS value
-             FROM sensor_readings sr
-            WHERE sr.pond_id = ANY($2::int[])
-              AND sr.time >= date_trunc('day', NOW() AT TIME ZONE $1) AT TIME ZONE $1
-            GROUP BY bucket
-            ORDER BY bucket ASC
-            LIMIT 5000`
-        : `SELECT (time_bucket('15 minutes', time AT TIME ZONE $1) AT TIME ZONE $1) AS bucket,
-                  ROUND(AVG(${column})::numeric, 2)::float8 AS value
-             FROM sensor_readings
-            WHERE time >= date_trunc('day', NOW() AT TIME ZONE $1) AT TIME ZONE $1
-            GROUP BY bucket
-            ORDER BY bucket ASC
-            LIMIT 5000`;
+      const sql = `SELECT (time_bucket('15 minutes', a.bucket AT TIME ZONE $1) AT TIME ZONE $1) AS bucket,
+                          ${rollupAvg("a", column)} AS value
+                     FROM ${ROLLUP_VIEW} a
+                    WHERE a.bucket >= date_trunc('day', NOW() AT TIME ZONE $1) AT TIME ZONE $1
+                          ${idsFilter ? "AND a.pond_id = ANY($2::int[])" : ""}
+                    GROUP BY 1
+                    ORDER BY 1 ASC
+                    LIMIT 5000`;
       const params = idsFilter ? [TZ, idsFilter] : [TZ];
       const { rows } = await pool.query<{ bucket: Date; value: number | null }>(sql, params);
       return NextResponse.json({
@@ -161,100 +167,40 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // ---------- 7d / 14d / 30d / 1y (aggregated) ----------
+    // ---------- 7d / 14d / 30d / 1y (aggregated, from the rollup) ----------
     const cfg = RANGE_BUCKETS[rangeParam];
 
-    if (pondId !== null) {
-      const { rows } = await pool.query<{
-        bucket: Date;
-        avg: number | null;
-        min: number | null;
-        max: number | null;
-        anomaly_count: string;
-        optimal_min: number | null;
-        optimal_max: number | null;
-      }>(
-        `SELECT
-            (time_bucket($1::interval, sr.time AT TIME ZONE $5) AT TIME ZONE $5) AS bucket,
-            ROUND(AVG(sr.${column})::numeric, 2)::float8 AS avg,
-            ROUND(MIN(sr.${column})::numeric, 2)::float8 AS min,
-            ROUND(MAX(sr.${column})::numeric, 2)::float8 AS max,
-            COUNT(*) FILTER (
-              WHERE sr.${column} < pst.optimal_min
-                 OR sr.${column} > pst.optimal_max
-            ) AS anomaly_count,
-            AVG(pst.optimal_min)::float8 AS optimal_min,
-            AVG(pst.optimal_max)::float8 AS optimal_max
-           FROM sensor_readings sr
-           LEFT JOIN pond_sensor_thresholds pst
-             ON pst.pond_id = sr.pond_id
-            AND pst.sensor  = $2
-          WHERE sr.pond_id = $3
-            AND sr.time >= NOW() - $4::interval
-          GROUP BY bucket
-          ORDER BY bucket ASC
-          LIMIT 2000`,
-        [cfg.bucket, column, pondId, cfg.interval, TZ]
-      );
-
-      return NextResponse.json({
-        mode: "aggregated",
-        bucketSize: cfg.label,
-        data: rows
-          .filter((r) => r.avg !== null)
-          .map((r) => ({
-            time: r.bucket.getTime(),
-            avg: r.avg as number,
-            min: r.min as number,
-            max: r.max as number,
-            anomalyCount: Number(r.anomaly_count),
-            health: deriveHealth(r.avg, r.optimal_min, r.optimal_max),
-          })),
-      });
-    }
-
-    const idsFilter = pondIds ?? null;
-    const sql = idsFilter
-      ? `SELECT (time_bucket($1::interval, sr.time AT TIME ZONE $4) AT TIME ZONE $4) AS bucket,
-                ROUND(AVG(sr.${column})::numeric, 2)::float8 AS avg,
-                ROUND(MIN(sr.${column})::numeric, 2)::float8 AS min,
-                ROUND(MAX(sr.${column})::numeric, 2)::float8 AS max,
-                COUNT(*) FILTER (
-                  WHERE sr.${column} < pst.optimal_min
-                     OR sr.${column} > pst.optimal_max
-                ) AS anomaly_count,
-                AVG(pst.optimal_min)::float8 AS optimal_min,
-                AVG(pst.optimal_max)::float8 AS optimal_max
-           FROM sensor_readings sr
-           LEFT JOIN pond_sensor_thresholds pst
-             ON pst.pond_id = sr.pond_id
-            AND pst.sensor  = $2
-          WHERE sr.pond_id = ANY($5::int[])
-            AND sr.time >= NOW() - $3::interval
-          GROUP BY bucket
-          ORDER BY bucket ASC
-          LIMIT 2000`
-      : `SELECT (time_bucket($1::interval, sr.time AT TIME ZONE $4) AT TIME ZONE $4) AS bucket,
-                ROUND(AVG(sr.${column})::numeric, 2)::float8 AS avg,
-                ROUND(MIN(sr.${column})::numeric, 2)::float8 AS min,
-                ROUND(MAX(sr.${column})::numeric, 2)::float8 AS max,
-                COUNT(*) FILTER (
-                  WHERE sr.${column} < pst.optimal_min
-                     OR sr.${column} > pst.optimal_max
-                ) AS anomaly_count,
-                AVG(pst.optimal_min)::float8 AS optimal_min,
-                AVG(pst.optimal_max)::float8 AS optimal_max
-           FROM sensor_readings sr
-           LEFT JOIN pond_sensor_thresholds pst
-             ON pst.pond_id = sr.pond_id
-            AND pst.sensor  = $2
-          WHERE sr.time >= NOW() - $3::interval
-          GROUP BY bucket
-          ORDER BY bucket ASC
-          LIMIT 2000`;
-    const params = idsFilter
-      ? [cfg.bucket, column, cfg.interval, TZ, idsFilter]
-      : [cfg.bucket, column, cfg.interval, TZ];
+    // Same statement for one pond, a list, or all: only the pond predicate
+    // changes. Parameters are always referenced so Postgres can type them.
+    //
+    // GROUP BY is positional on purpose: the rollup has its own column named
+    // `bucket`, and Postgres resolves an ambiguous GROUP BY name to the INPUT
+    // column — which would silently group at 15 minutes for every range.
+    const pondPredicate =
+      pondId !== null
+        ? "AND a.pond_id = $5"
+        : pondIds
+          ? "AND a.pond_id = ANY($5::int[])"
+          : "";
+    const sql = `SELECT (time_bucket($1::interval, a.bucket AT TIME ZONE $4) AT TIME ZONE $4) AS bucket,
+                        ${rollupAvg("a", column)} AS avg,
+                        ${rollupMin("a", column)} AS min,
+                        ${rollupMax("a", column)} AS max,
+                        ${rollupAnomalyCount("a", column)} AS anomaly_count,
+                        AVG(pst.optimal_min)::float8 AS optimal_min,
+                        AVG(pst.optimal_max)::float8 AS optimal_max
+                   FROM ${ROLLUP_VIEW} a
+                   LEFT JOIN pond_sensor_thresholds pst
+                     ON pst.pond_id = a.pond_id
+                    AND pst.sensor  = $2
+                  WHERE a.bucket >= NOW() - $3::interval
+                        ${pondPredicate}
+                  GROUP BY 1
+                  ORDER BY 1 ASC
+                  LIMIT 2000`;
+    const params: unknown[] = [cfg.bucket, column, cfg.interval, TZ];
+    if (pondId !== null) params.push(pondId);
+    else if (pondIds) params.push(pondIds);
 
     const { rows } = await pool.query<{
       bucket: Date;

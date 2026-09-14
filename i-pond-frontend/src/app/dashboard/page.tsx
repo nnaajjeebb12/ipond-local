@@ -69,15 +69,18 @@ export default function DashboardPage() {
 			: null;
 	const { lookup: lookupThreshold } = useThresholds(singlePondId);
 
-	const tempAgg = useMultiPondReadings('temperature', range, pondsParam);
-	const phAgg = useMultiPondReadings('ph', range, pondsParam);
-	const doxAgg = useMultiPondReadings('dox', range, pondsParam);
-	const salinityAgg = useMultiPondReadings('salinity', range, pondsParam);
+	// Only the visible view mode polls. Hooks must be called unconditionally
+	// (rules of hooks), so the inactive set is parked rather than skipped.
+	const showCompare = viewMode === 'compare';
+	const tempAgg = useMultiPondReadings('temperature', range, pondsParam, !showCompare);
+	const phAgg = useMultiPondReadings('ph', range, pondsParam, !showCompare);
+	const doxAgg = useMultiPondReadings('dox', range, pondsParam, !showCompare);
+	const salinityAgg = useMultiPondReadings('salinity', range, pondsParam, !showCompare);
 
-	const tempCmp = useCompareReadings('temperature', range, pondsParam);
-	const phCmp = useCompareReadings('ph', range, pondsParam);
-	const doxCmp = useCompareReadings('dox', range, pondsParam);
-	const salinityCmp = useCompareReadings('salinity', range, pondsParam);
+	const tempCmp = useCompareReadings('temperature', range, pondsParam, showCompare);
+	const phCmp = useCompareReadings('ph', range, pondsParam, showCompare);
+	const doxCmp = useCompareReadings('dox', range, pondsParam, showCompare);
+	const salinityCmp = useCompareReadings('salinity', range, pondsParam, showCompare);
 
 	const pondColorMap = useMemo(() => {
 		const m = new Map<number, string>();
@@ -119,7 +122,6 @@ export default function DashboardPage() {
 	}
 
 	const selectedCount = selectedPondIds?.size ?? 0;
-	const showCompare = viewMode === 'compare';
 
 	return (
 		<MainLayout>
