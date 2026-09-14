@@ -291,9 +291,19 @@ docker compose up -d
   the database and takes effect on the next sync; `SYNC_OWNER_ID` in `.env`
   is only the initial value.
 - **The main server is never changed.** It has no API for creating ponds or
-  reading owners with a token, so a pond added on the Pi must also be created
-  under the same account in the main server's admin console (`/admin/ponds`)
-  before its readings will sync.
+  reading owners with a token, so a pond added on the Pi must also exist on the
+  main server before its readings will sync — and it must carry the site's
+  owner: the receiver matches `ponds.owner_id`, which the main server's admin
+  console does **not** set. Per pond, on the main server's database:
+
+  ```sql
+  UPDATE ponds SET owner_id = '<site owner UUID>' WHERE pond_code = 'PND-011';
+  ```
+
+  Until then that pond's readings wait on the Pi (the sidebar names the pond);
+  every other pond keeps syncing. The main server also needs a unique index on
+  `sensor_readings (pond_id, time)` — without it every batch fails with
+  "Main server returned 500".
 
 ### Database performance notes
 

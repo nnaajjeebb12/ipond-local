@@ -992,9 +992,11 @@ docker compose up -d                  # recreates the database container with th
    code is assigned automatically (`PND-011`, `PND-012`, …).
 2. Set the sensor board / gateway for that pond to post the matching number
    (`PND-011` → `pnd: 11`).
-3. Ask Soletronix to create the same pond code under this site's account on
-   the main server. Until that is done the sidebar shows "pond not found under
-   this owner" and the pond's readings wait on the Pi — nothing is lost.
+3. Ask Soletronix to create the same pond code on the main server **and set
+   its owner to this site's account** (a database step on their side — the
+   admin console alone is not enough). Until that is done the sidebar shows
+   "PND-0NN not found under this owner" and only that pond's readings wait on
+   the Pi — every other pond keeps syncing and nothing is lost.
 
 ### Checking the license and the cloud owner
 

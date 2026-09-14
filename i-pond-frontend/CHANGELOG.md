@@ -1,5 +1,21 @@
 # Changelog
 
+## [2026-09-14] — Worker matched to the real sync receiver; one missing pond no longer blocks the site
+
+### Changed
+- **The real receiver is now known** (`cloned main/…/src/app/api/sync/route.ts`, commit b0c3b75) and mirrored verbatim into `src/app/api/sync/route.ts`. It answers `{ ok, inserted, skipped }` only; `inserted` counts duplicates; `skipped` = no pond for `(owner_id, pond_code)`; it matches `ponds.owner_id`, not `user_pond_access`.
+- **Bug fixed before it shipped:** the worker treated a response without an `unknown` field as "old receiver, mark everything" — against the real receiver, a pond missing on the main server would have had its readings marked `synced_at` locally and lost. `postBatch` now reads `skipped` as "not on the server".
+- **One missing pond no longer wedges sync.** The receiver does not say which rows it skipped, so on `skipped > 0` the worker probes one reading per pond code (a re-send is a free no-op), marks only the ponds the server has, and excludes the unknown codes from later batches this run. Result gains `unknownPonds`; the sidebar message names them. `pond_mismatch` is returned only when nothing could ship.
+- Verified against the real receiver code on a second instance/database: ponds 1–2 under the owner synced while a console-style pond with NULL `owner_id` was isolated (`synced 3, 2 waiting — PND-003`); a repeat run marked nothing; after `UPDATE ponds SET owner_id` on the main side the 2 shipped; a wrong owner → `pond_mismatch`, nothing marked.
+
+### Files Modified
+- src/lib/sync.ts, src/app/api/sync/route.ts *(now a verbatim mirror)*
+- CLAUDE.md, README.md, docs/Pi-Deployment-Checklist.md
+
+### Notes
+- **Two main-server DB prerequisites, per site — data, not code:** (1) `ponds.owner_id` must be set to the site's owner UUID for every pond that syncs (the admin console leaves it NULL — `UPDATE ponds SET owner_id = … WHERE pond_code = …`); (2) a unique index on `sensor_readings (pond_id, time)` must exist or `ON CONFLICT` makes every batch 500. Neither is in the main repo's migrations; both must be true on the live DB already if sync has ever worked there.
+- The middleware change in b0c3b75 exempts `/api/sync` from the login redirect — that is why the live site answers 401 rather than a redirect.
+
 ## [2026-09-14] — Cloud owner is local-only; main server is never changed
 
 ### Changed

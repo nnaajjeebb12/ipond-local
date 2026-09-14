@@ -43,8 +43,10 @@ export type SyncResult = {
 	synced: number;
 	pending: number;
 	batches: number;
-	/** Rows the server accepted but did not insert: duplicates, or unknown (owner, pond_code). */
+	/** Rows the server would not take: no pond for (owner, pond_code) there. Left pending here. */
 	skipped: number;
+	/** Pond codes the main server does not have under this owner. Their readings stay pending. */
+	unknownPonds: string[];
 	message: string;
 };
 
@@ -173,7 +175,7 @@ export async function lastSyncAt(pool: Pool): Promise<string | null> {
  * whole batch, and because batches are taken in time order that same batch
  * would be retried every run — one bad row would wedge sync forever.
  */
-async function fetchBatch(pool: Pool): Promise<ReadingRow[]> {
+async function fetchBatch(pool: Pool, excludeCodes: string[] = []): Promise<ReadingRow[]> {
 	const { rows } = await pool.query<ReadingRow>(
 		`SELECT to_char(sr.time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS time_iso,
             sr.pond_id, p.pond_code, temperature, ph, salinity, dissolved_oxygen
@@ -181,10 +183,70 @@ async function fetchBatch(pool: Pool): Promise<ReadingRow[]> {
        JOIN ponds p ON p.id = sr.pond_id
       WHERE sr.synced_at IS NULL
         AND p.pond_code IS NOT NULL
+        AND NOT (p.pond_code = ANY($1::text[]))
       ORDER BY sr.time ASC
-      LIMIT ${BATCH_SIZE}`
+      LIMIT ${BATCH_SIZE}`,
+		[excludeCodes]
 	);
 	return rows;
+}
+
+type WireReading = {
+	time: string;
+	owner_id: string;
+	pond_code: string | null;
+	temperature: number | null;
+	ph: number | null;
+	salinity: number | null;
+	dissolved_oxygen: number | null;
+	source: "local-pi";
+};
+
+/**
+ * What the receiver said about a batch.
+ *
+ * The production receiver (cloned main/…/src/app/api/sync/route.ts, mirrored
+ * in src/app/api/sync/route.ts here) answers `{ ok, inserted, skipped }`:
+ *   inserted — rows whose (owner_id, pond_code) resolved to a pond. Counted
+ *              even when ON CONFLICT dropped them as duplicates, so this is
+ *              "on the server now", which is exactly what synced_at means.
+ *   skipped  — rows it could NOT place: no pond for that owner + code. NOT
+ *              on the server. Marking them here would lose them for good.
+ * An `unknown` field, if a receiver ever sends one, is preferred over skipped.
+ */
+type Ack = { inserted: number | null; notOnServer: number | null };
+
+async function postBatch(target: string, token: string, readings: WireReading[]): Promise<
+	{ ok: true; ack: Ack } | { ok: false; kind: "network" | "http"; detail: string; status?: number }
+> {
+	let res: Response;
+	try {
+		res = await fetchWithTimeout(
+			`${target}/api/sync`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+				body: JSON.stringify({ readings }),
+			},
+			POST_TIMEOUT_MS
+		);
+	} catch (err) {
+		return { ok: false, kind: "network", detail: String(err) };
+	}
+	if (!res.ok) {
+		const body = await res.text().catch(() => "");
+		return { ok: false, kind: "http", status: res.status, detail: body.slice(0, 200) };
+	}
+	const ack: Ack = { inserted: null, notOnServer: null };
+	try {
+		const j = (await res.json()) as { inserted?: unknown; skipped?: unknown; unknown?: unknown };
+		if (typeof j.inserted === "number") ack.inserted = j.inserted;
+		if (typeof j.unknown === "number") ack.notOnServer = j.unknown;
+		else if (typeof j.skipped === "number") ack.notOnServer = j.skipped;
+	} catch {
+		// receiver without counts — fall through with nulls
+	}
+	return { ok: true, ack };
 }
 
 /** Pending rows that fetchBatch will never pick up. Surfaced, never silently dropped. */
@@ -225,6 +287,7 @@ function result(
 		pending: 0,
 		batches: 0,
 		skipped: 0,
+		unknownPonds: [],
 		message,
 		...extra,
 	};
@@ -305,126 +368,98 @@ export async function runSync(
 	let synced = 0;
 	let batches = 0;
 	let skipped = 0;
+	// Pond codes the server has already told us it does not have under this
+	// owner. Their rows are left out of later batches this run so one pond
+	// that is missing on the main server cannot wedge sync for all the others
+	// — batches are time-ordered, so without this the same batch would come
+	// back every run until someone created that pond on the server.
+	const unknownPonds = new Set<string>();
+
+	const toWire = (r: ReadingRow): WireReading => ({
+		time: r.time_iso,
+		owner_id: ownerId,
+		pond_code: r.pond_code,
+		temperature: r.temperature,
+		ph: r.ph,
+		salinity: r.salinity,
+		dissolved_oxygen: r.dissolved_oxygen,
+		source: "local-pi",
+	});
+
+	const partial = (): Partial<SyncResult> => ({
+		synced,
+		batches,
+		skipped,
+		unknownPonds: [...unknownPonds],
+		pending: Math.max(pending - synced, 0),
+	});
 
 	while (batches < MAX_BATCHES) {
 		let batch: ReadingRow[];
 		try {
-			batch = await fetchBatch(pool);
+			batch = await fetchBatch(pool, [...unknownPonds]);
 		} catch (err) {
 			log(`local db error while reading batch: ${String(err)}`);
-			return result("db_error", "Could not read the local database", {
-				synced,
-				batches,
-				pending: pending - synced,
-			});
+			return result("db_error", "Could not read the local database", partial());
 		}
 
 		if (batch.length === 0) break;
 		batches += 1;
 
-		const readings = batch.map((r) => ({
-			time: r.time_iso,
-			owner_id: ownerId,
-			pond_code: r.pond_code,
-			temperature: r.temperature,
-			ph: r.ph,
-			salinity: r.salinity,
-			dissolved_oxygen: r.dissolved_oxygen,
-			source: "local-pi" as const,
-		}));
-
-		let res: Response;
-		try {
-			res = await fetchWithTimeout(
-				`${target}/api/sync`,
-				{
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json",
-						Authorization: `Bearer ${token}`,
-					},
-					body: JSON.stringify({ readings }),
-				},
-				POST_TIMEOUT_MS
-			);
-		} catch (err) {
-			log(`batch ${batches} failed to send: ${String(err)}`);
-			return result("server_unreachable", "Lost connection mid-sync", {
-				synced,
-				batches: batches - 1,
-				pending: pending - synced,
-			});
+		const sent = await postBatch(target, token, batch.map(toWire));
+		if (!sent.ok) {
+			batches -= 1;
+			if (sent.kind === "network") {
+				log(`batch ${batches + 1} failed to send: ${sent.detail}`);
+				return result("server_unreachable", "Lost connection mid-sync", partial());
+			}
+			log(`batch ${batches + 1} rejected: ${sent.status} ${sent.detail}`);
+			return result("server_error", `Main server returned ${sent.status}`, partial());
 		}
 
-		if (!res.ok) {
-			const body = await res.text().catch(() => "");
-			log(`batch ${batches} rejected: ${res.status} ${body.slice(0, 200)}`);
-			return result("server_error", `Main server returned ${res.status}`, {
-				synced,
-				batches: batches - 1,
-				pending: pending - synced,
-			});
-		}
-
-		// The server reports how many it actually inserted. A skip is either a
-		// duplicate (harmless) or an unknown (owner, pond_code) pair — the server
-		// does not say which per row, so surface the count loudly in the log.
-		let serverInserted: number | null = null;
-		let serverSkipped: number | null = null;
-		let serverUnknown: number | null = null;
-		try {
-			const ack = (await res.json()) as { inserted?: unknown; skipped?: unknown; unknown?: unknown };
-			if (typeof ack.inserted === "number") serverInserted = ack.inserted;
-			if (typeof ack.skipped === "number") serverSkipped = ack.skipped;
-			if (typeof ack.unknown === "number") serverUnknown = ack.unknown;
-		} catch {
-			// older receiver without counts — fall through
-		}
-		if (serverSkipped !== null) skipped += serverSkipped;
-
-		// The server could not resolve (owner_id, pond_code) for some rows. They
-		// are NOT on the far side, so marking them synced here would lose them
-		// for good. Stop, mark nothing from this batch, and say why. Almost
-		// always a wrong SYNC_OWNER_ID or ponds not yet created on the server.
-		if (serverUnknown !== null && serverUnknown > 0) {
+		let toMark = batch;
+		if (sent.ack.notOnServer !== null && sent.ack.notOnServer > 0) {
+			// The receiver does not say WHICH rows it could not place, so ask it
+			// one pond at a time with a single reading each. Re-sending a row it
+			// already has is a no-op (ON CONFLICT), so the probe is free.
+			const codes = [...new Set(batch.map((r) => r.pond_code ?? ""))];
+			for (const code of codes) {
+				const sample = batch.find((r) => r.pond_code === code);
+				if (!sample) continue;
+				const probe = await postBatch(target, token, [toWire(sample)]);
+				if (!probe.ok) {
+					log(`probe for ${code} failed: ${probe.detail} — marking nothing from this batch`);
+					return result(
+						probe.kind === "network" ? "server_unreachable" : "server_error",
+						"Lost connection mid-sync",
+						partial()
+					);
+				}
+				if (probe.ack.notOnServer !== null && probe.ack.notOnServer > 0) unknownPonds.add(code);
+			}
+			toMark = batch.filter((r) => !unknownPonds.has(r.pond_code ?? ""));
+			skipped += batch.length - toMark.length;
 			log(
-				`batch ${batches}: server did not recognise ${serverUnknown}/${batch.length} rows — ` +
-					`the pond codes in this batch (${[...new Set(batch.map((r) => r.pond_code))].join(", ")}) must exist under owner ${ownerId} ` +
-					`on the main server (create them in its admin console), or the owner on Settings > Appliance is wrong. Nothing marked.`
-			);
-			return result("pond_mismatch", `Main server rejected ${serverUnknown} readings: pond not found under this owner — create it on the main server`, {
-				synced,
-				batches: batches - 1,
-				skipped,
-				pending: pending - synced,
-			});
-		}
-		// Older receiver that cannot distinguish: warn, but proceed as before.
-		if (serverUnknown === null && serverSkipped !== null && serverInserted === 0 && serverSkipped === batch.length) {
-			log(
-				`batch ${batches}: server skipped ALL ${batch.length} rows and does not report why — ` +
-					`if this is not a re-send, check SYNC_OWNER_ID`
+				`batch ${batches}: server has no pond for ${[...unknownPonds].join(", ")} under owner ${ownerId} — ` +
+					`${batch.length - toMark.length} reading(s) left pending. Create the pond(s) under that owner on the main server ` +
+					`(and set ponds.owner_id there), or fix the owner on Settings > Appliance.`
 			);
 		}
 
-		// Accepted. Mark locally even when the server skipped duplicates — the
-		// rows are on the far side either way, which is what synced_at means.
-		let marked: number;
-		try {
-			marked = await markSynced(pool, batch);
-		} catch (err) {
-			log(`batch ${batches} sent but could not be marked: ${String(err)}`);
-			return result("db_error", "Sent, but could not update the local database", {
-				synced,
-				batches: batches - 1,
-				pending: pending - synced,
-			});
+		let marked = 0;
+		if (toMark.length > 0) {
+			try {
+				marked = await markSynced(pool, toMark);
+			} catch (err) {
+				log(`batch ${batches} sent but could not be marked: ${String(err)}`);
+				return result("db_error", "Sent, but could not update the local database", partial());
+			}
 		}
 
 		synced += marked;
 		log(
 			`batch ${batches}: sent ${batch.length}, marked ${marked}` +
-				(serverInserted !== null ? `, server inserted ${serverInserted}, skipped ${serverSkipped}` : "")
+				(sent.ack.inserted !== null ? `, server accepted ${sent.ack.inserted}, could not place ${sent.ack.notOnServer ?? 0}` : "")
 		);
 
 		if (batch.length < BATCH_SIZE) break;
@@ -435,8 +470,21 @@ export async function runSync(
 		log(`batch ceiling reached — ${remaining} still pending, will resume next run`);
 	}
 
+	const unknownList = [...unknownPonds];
+	// Every pond we tried is missing on the server and nothing shipped: that
+	// is almost always a wrong owner, not ten missing ponds. Say so.
+	if (unknownList.length > 0 && synced === 0) {
+		return result(
+			"pond_mismatch",
+			`Main server has no pond for ${unknownList.join(", ")} under this owner — check the owner on Settings > Appliance, or create the ponds there`,
+			{ synced, batches, skipped, unknownPonds: unknownList, pending: remaining }
+		);
+	}
+
 	const msg =
 		`Synced ${synced} reading${synced === 1 ? "" : "s"}` +
-		(skipped > 0 ? ` (${skipped} skipped by server)` : "");
-	return result("ok", msg, { synced, batches, skipped, pending: remaining });
+		(unknownList.length > 0
+			? `; ${skipped} waiting — ${unknownList.join(", ")} not found under this owner on the main server`
+			: "");
+	return result("ok", msg, { synced, batches, skipped, unknownPonds: unknownList, pending: remaining });
 }
