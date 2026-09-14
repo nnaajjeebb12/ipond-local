@@ -148,11 +148,17 @@ if (PORT_PATH === '-') {
 } else {
   const { SerialPort } = require('serialport');
 
+  // When the port cannot be opened (cable out, wrong path), wait before
+  // exiting. The supervisor restarts us either way; without the pause it
+  // does so every ~0.4 s for as long as the cable is out — one Pi racked up
+  // 6,000 restarts and two log lines per second overnight.
+  const REOPEN_DELAY_MS = 10_000;
+
   const port = new SerialPort({ path: PORT_PATH, baudRate: BAUD }, (err) => {
     if (err) {
       console.error(`[${stamp()}] cannot open ${PORT_PATH}: ${err.message}`);
-      console.error('  Is the gateway plugged in? Try: ls -l /dev/serial/by-id/');
-      process.exit(1);
+      console.error(`  Is the gateway plugged in? Try: ls -l /dev/serial/by-id/  — retrying in ${REOPEN_DELAY_MS / 1000}s`);
+      setTimeout(() => process.exit(1), REOPEN_DELAY_MS);
     }
   });
 
