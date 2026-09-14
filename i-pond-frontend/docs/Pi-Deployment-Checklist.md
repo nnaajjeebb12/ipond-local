@@ -894,6 +894,21 @@ echo '{"data":{"pnd":1,"rtd":28.5,"ph":7.2,"sal":15.0,"dox":6.8}}' \
 > - `-> 404 {"error":"unknown_pond"}` → you skipped step 6.4
 > - `POST failed (is the app running?)` → `sudo systemctl status ipond`
 
+To keep fake data flowing (charts, alerts, sync — anything that needs a
+stream), run the simulator instead. It posts like ten independent gateways:
+
+```bash
+cd $APP_DIR
+SIM_PONDS=1,2 SIM_INTERVAL_MS=5000 npm run simulate     # ponds 1 and 2, one reading each every 5 s
+```
+
+Ctrl+C stops it. Leave out `SIM_PONDS` for all ten ponds. **Stop the real
+serial listener first** (`sudo systemctl stop ipond-serial`) or the two will
+interleave, and start it again after (`sudo systemctl start ipond-serial`).
+Simulated readings are ordinary readings — they sync to the cloud like any
+other, so do this before the Pi is connected to the customer's account, or
+delete them afterwards.
+
 ---
 
 ## 12. Final acceptance test

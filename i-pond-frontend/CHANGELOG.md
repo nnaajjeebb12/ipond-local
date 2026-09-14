@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-09-15] — `npm run simulate` restored and made configurable
+
+### Changed
+- `npm run simulate` (was missing from package.json) runs `scripts/simulate-esp32.ts`: fake gateways posting to `/api/send-sensor-data`. `SIM_PONDS=1,2` limits which ponds send; `SIM_INTERVAL_MS` sets the cadence (default 5000 — the old hardcoded 1000 was "fast mode"). `BASE_URL` targets another instance.
+- Checklist §11.7 documents it next to the stdin serial test, with the warning that simulated readings are real readings as far as sync is concerned.
+
+### Files Modified
+- package.json, scripts/simulate-esp32.ts, docs/Pi-Deployment-Checklist.md
+
 ## [2026-09-14] — Alerts eased: no re-nagging after acknowledge/ignore, instant popup, sustained-window sensor rule
 
 ### Changed

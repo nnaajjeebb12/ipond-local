@@ -41,6 +41,10 @@ if (!API_TOKEN) {
 
 const ENDPOINT = `${BASE_URL.replace(/\/$/, '')}/api/send-sensor-data`;
 const POND_COUNT = 10;
+const SIM_PONDS = (process.env.SIM_PONDS ?? fileEnv.SIM_PONDS ?? '')
+	.split(',')
+	.map((x) => Number(x.trim()))
+	.filter((n) => Number.isInteger(n) && n >= 1);
 const ANOMALY_CHANCE = 0.15;
 
 // ---------- per-pond baselines ----------
@@ -177,8 +181,10 @@ async function sendOnce(pondId: number, startedAt: number) {
 	}
 }
 
-// const SEND_INTERVAL_MS = 15 * 60 * 1000;
-const SEND_INTERVAL_MS = 1000; // 1s — fast mode for chart density testing
+// One reading per pond per SEND_INTERVAL_MS. The real gateway posts every few
+// seconds; 5 s is a realistic default. SIM_INTERVAL_MS overrides, SIM_PONDS
+// limits which ponds send (e.g. SIM_PONDS=1,2 for a two-gateway site).
+const SEND_INTERVAL_MS = Number(process.env.SIM_INTERVAL_MS ?? fileEnv.SIM_INTERVAL_MS ?? 5000);
 
 async function pondLoop(pondId: number) {
 	const bootDelayMs = Math.floor(Math.random() * 2000);
@@ -201,7 +207,9 @@ async function pondLoop(pondId: number) {
 // ---------- main ----------
 
 console.log(`Simulator -> ${ENDPOINT}`);
-console.log(`Spawning ${POND_COUNT} independent ponds. Ctrl+C to stop.\n`);
+const PONDS = SIM_PONDS.length > 0 ? SIM_PONDS : Array.from({ length: POND_COUNT }, (_, i) => i + 1);
+console.log(`Ponds ${PONDS.join(', ')} every ${SEND_INTERVAL_MS} ms. Ctrl+C to stop.
+`);
 
 function shutdown() {
 	if (stopping) return;
@@ -215,7 +223,7 @@ process.on('SIGTERM', shutdown);
 
 (async () => {
 	const loops: Promise<void>[] = [];
-	for (let i = 1; i <= POND_COUNT; i++) {
+	for (const i of PONDS) {
 		loops.push(pondLoop(i));
 	}
 	await Promise.all(loops);
