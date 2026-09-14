@@ -23,3 +23,6 @@ build/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Local clone of the main server, kept for reference only
+cloned main/

@@ -1,5 +1,25 @@
 # Changelog
 
+## [2026-09-14] — Cloud owner is local-only; main server is never changed
+
+### Changed
+- **Decision: nothing on the main server changes, ever.** A clone of the live main server (`../cloned main/`, gitignored) confirmed it has no token-authenticated way to read owners or create ponds — `precheck` needs the owner's password and returns only ok/invalid/expired; pond creation is `/api/admin/ponds` behind a NextAuth admin session. The live site has `POST /api/sync` (answers 401 = exists, though it is *not* in the clone — the deployed receiver is ahead of the repo) and nothing else for this appliance.
+- **Removed the two reference endpoints** (`src/app/api/sync/owner`, `src/app/api/sync/ponds`) and the worker's `registerPonds` / `lookupOwner` calls. They only made sense as additions to the main server.
+- **Owner card is now entirely local.** The admin types the owner's *name* and *ID* (both required) after the local admin login; saved to `app_settings` with no remote verification and no reachability requirement. The card explains that a wrong ID is not data loss: the next sync stops with `pond_mismatch`, marks nothing, and the log now names the pond codes and owner involved.
+- **Add Pond** copy and the checklist now say the same code must be created by hand under this site's account in the main server's admin console.
+- `GET /api/settings/owner` no longer probes the main server (dropped `online`, `serverReachable`, `live`); `PUT` adds `name` (required).
+
+### Files Modified
+- src/lib/sync.ts, src/lib/settings.ts
+- src/app/api/settings/owner/route.ts, src/app/settings/appliance/page.tsx, src/components/AddPondButton.tsx
+- src/app/api/sync/owner/route.ts *(deleted)*, src/app/api/sync/ponds/route.ts *(deleted)*
+- CLAUDE.md, README.md, docs/Pi-Deployment-Checklist.md, root .gitignore
+
+### Notes
+- Verified with the main server unreachable: GET shows the `.env` seed; PUT 401 anonymous, 400 without a name, 200 after admin login; `/api/sync/status` reports `configured: true` from the DB owner.
+- Owners = users on the main server: one `owners` table (`id` = `SYNC_OWNER_ID`, `name`, `email`, `password_hash`, `role`, `expires_at`). The appliance's owner is the customer's login account.
+- The previous commit briefly recorded `cloned main/i-pond-frontend` as an embedded-repo gitlink; removed here and the folder is ignored at the repo root.
+
 ## [2026-09-14] — Add ponds from the dashboard, license status page, cloud-owner panel with admin gate
 
 ### Changed

@@ -992,25 +992,25 @@ docker compose up -d                  # recreates the database container with th
    code is assigned automatically (`PND-011`, `PND-012`, …).
 2. Set the sensor board / gateway for that pond to post the matching number
    (`PND-011` → `pnd: 11`).
-3. Nothing else. On the next sync the pond is created on the main server
-   automatically — if the main server has the `/api/sync/ponds` endpoint
-   (Soletronix will confirm). If not, ask Soletronix to create the pond there
-   under this site's owner; until then its readings stay pending on the Pi.
+3. Ask Soletronix to create the same pond code under this site's account on
+   the main server. Until that is done the sidebar shows "pond not found under
+   this owner" and the pond's readings wait on the Pi — nothing is lost.
 
 ### Checking the license and the cloud owner
 
 Sidebar → **Appliance**. The license card shows who it is licensed to, the
 days remaining and the expiry date — always, not only near expiry. The cloud
-owner card shows which main-server owner this Pi's data goes to.
+owner card shows which main-server account this Pi's data goes to.
 
-To change the owner (rare — only when Soletronix tells you to):
+To set the owner's name, or change the owner (rare — only when Soletronix
+tells you to):
 
-- [ ] The Pi must have internet (the card shows "Main server reachable").
 - [ ] Click **Admin login** — username `soletronix`, password
       `Soletronix@pi2026`.
-- [ ] Paste the new owner ID and click **Verify with main server & save**. It
-      is checked with the main server before it is saved; a wrong ID is
-      refused.
+- [ ] Type the owner name and paste the owner ID **exactly** as Soletronix
+      gave them, then click **Save owner**. The ID is not checked online — if
+      it is wrong, the sidebar will say "pond not found under this owner" on
+      the next sync; correct it here and sync resumes. Nothing is lost.
 
 ### Backing up the database
 
